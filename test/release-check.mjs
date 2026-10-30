@@ -47,12 +47,16 @@ try {
 
 // 5. 打包内容：该带的带、不该带的不带
 try {
-  const raw = execSync('npm pack --json --dry-run', {
+  // `--loglevel=silent` + 截到第一个 `[` 之前的内容一起丢掉：不同 npm 版本/终端会往
+  // stdout 或 stderr 混 notices，CI 与本地不该因为这个差出结果。
+  const raw = execSync('npm pack --json --dry-run --loglevel=silent', {
     cwd: root,
     encoding: 'utf8',
     stdio: ['ignore', 'pipe', 'ignore'],
   })
-  const packed = JSON.parse(raw)[0]
+  const jsonAt = raw.indexOf('[')
+  if (jsonAt < 0) throw new Error('npm pack 没有输出 JSON：' + raw.trim().slice(0, 120))
+  const packed = JSON.parse(raw.slice(jsonAt))[0]
   const files = packed.files.map((entry) => entry.path)
   const required = ['index.js', 'client.js', 'cordis.patch.yml', 'README.md', 'CHANGELOG.md', 'LICENSE', 'test/host-smoke.mjs']
   const missing = required.filter((entry) => !files.includes(entry))

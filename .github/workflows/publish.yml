@@ -32,7 +32,21 @@ jobs:
       - name: 更新 npm（trusted publishing 需要较新版本）
         run: npm install -g npm@latest
       - name: release check
-        run: npm run release:check
+        # 失败时把原因抬成 annotation：公开仓库的日志要鉴权才能下载，
+        # 但 check-run 的 annotations 是公开可读的，排查不用再靠猜。
+        run: |
+          set -o pipefail
+          npm run release:check 2>&1 | tee release-check.log
+          status=$?
+          if [ $status -ne 0 ]; then
+            grep -E '^  FAIL|Error|error' release-check.log | head -20 | while IFS= read -r line; do
+              echo "::error title=release-check::$line"
+            done
+            tail -20 release-check.log | while IFS= read -r line; do
+              echo "::error title=release-check(tail)::$line"
+            done
+          fi
+          exit $status
       - name: npm publish
         run: |
           if [ "${{ inputs.dry_run }}" = "true" ]; then
