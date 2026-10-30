@@ -127,14 +127,33 @@ powershell -NoProfile -ExecutionPolicy Bypass -File tools/probe.ps1 -Stop     # 
 
 `tools/cdp.mjs` 只用 Node 内置的 `fetch`/`WebSocket`（Node ≥ 22），不需要 Playwright。
 
-## 发布
+## 发布与分享
+
+本目录已经是一个可直接发布的包：MIT、`files` 白名单 6 个文件、`npm pack` = 32.5 kB、`npm test` 可移植（自带临时素材，不依赖本机路径）。
+
+**发到 npm**
 
 ```sh
-npm login          # 一次性
-npm publish        # 发布本目录（files 白名单已限定 6 个文件）
+cd <本目录>
+npm login          # 浏览器登录 npmjs.com；没有账号先去 https://www.npmjs.com/signup
+npm publish        # 发布（账号开了 2FA 会要一次 OTP，或改用 Automation Token）
 ```
 
-本机当前 npm 未登录（`npm error code ENEEDAUTH`），所以这一步留给你；登录后 `npm publish` 即可。`npm pack --dry-run` 的打包结果是 6 个文件、31.5 kB。
+不想交互登录，就用 token：
+
+1. npmjs.com → 头像 → Access Tokens → Generate New Token → **Granular Access Token**，权限 Read and write，勾选 bypass 2FA；
+2. `npm publish --//registry.npmjs.org/:_authToken=npm_你的token`。
+
+**发到 GitHub**
+
+```sh
+gh auth login                                             # 一次性
+gh repo create dsh-plugin-image-preview --public --source=. --push
+```
+
+**离线分享**：`npm pack` 产出的 `dsh-plugin-image-preview-0.2.0.tgz` 直接发给别人，对方在 profile 里 `file:` 指向该 tgz 即可。
+
+**装到别的机器**：web profile 用 `dsh plugin add dsh-plugin-image-preview`；desktop profile 走插件管理器，或按上文「本地目录开发」的 `file:` + junction 方式手接（desktop 这个名字被保留，`dsh plugin --profile desktop` 会被拒）。
 
 ## 升级 DSH 之后怎么自检（三个面各自独立）
 
