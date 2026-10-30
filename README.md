@@ -159,7 +159,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File tools\probe.ps1 -Stop
 | `-Stop` | 立刻杀整棵树 + 清 pid/端口/桌面记录 + **删掉探针 home**（默认；`-KeepHome` 保留） |
 | `-Status` | pid / 端口 / CDP 目标 / 窗口挂在哪个桌面 |
 | `-Visible` | 在当前桌面上起一个**看得见**的探针，仅人工排查用（这是唯一会弹窗的路径） |
-| `-Arm` / `-Idle` | 在隐藏桌面上还原 / 收起窗口。`cdp.mjs shot` 会自动用它们，因为最小化时截图是空帧 |
+| `-Arm` / `-Idle` | 在隐藏桌面上还原 / 收起窗口。`cdp.mjs shot` 会自动用它们——**最小化的窗口不产帧**，直接截会挂到超时（实测 30 秒、零字节），所以这步不能省 |
 | `-KeepHome` | 停止时不删探针 home（默认删：里面有一份 `.credentials.yaml` 副本和会话副本，留着既占盘也不干净，下次 `-Start` 两秒重建） |
 
 ### 为什么没有“外挂看门狗”
@@ -172,6 +172,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File tools\probe.ps1 -Stop
 
 - 另外几条“让窗口不可见”的路都试过并否决了：最小化有 DWM 动画会闪；跨进程 `DwmSetWindowAttribute` 设隐身被系统拒绝（`0x80070005`）；把窗口挪到 `-32000,-32000` 会被 Electron 在显示时还原，实测仍有约 13ms 可见。
 - **空闲不渲染**：窗口在该隐藏桌面上被最小化，稳定后 `renderer` / `gpu-process` 的 CPU 都是 0.00%——不会为一个没人看的“桌面显示”花资源。
+- **但截图前必须 `-Arm`**：最小化的窗口**不产帧**，`Page.captureScreenshot` 不会给你一张黑图，而是挂起直到超时（实测 30 秒、一个字节都没有）。`-Arm` 还原后截出来是 2558×1640、5900 种颜色，连拍两张字节数一致；截完 `-Idle` 再收起，空闲 CPU 仍回到 0.00%。`cdp.mjs shot` 已内置这一对动作，且失败时会直说是“窗口最小化没有帧”。
 - Windows 只合成你正在用的桌面，但 Chromium 自己照常出帧，所以截图不需要把窗口摆出来：实测 2558×1640、191 种颜色，与真实界面一致。
 - 两个会话并发 `-Start` 有全局互斥锁兜底，不会起出两个实例。
 - 探针的 `user-data` 是全新的，**不会**继承主实例的外观设置，所以它默认是浅色（纯白）。这是隔离的代价，不是 bug；真要一致，等主实例退出后把 `%APPDATA%\@deepseek-ai\dsh-desktop\Local Storage\leveldb` 拷进 `%TEMP%\dsh-probe-imgprev\user-data\Local Storage\leveldb`（leveldb 活着时被锁，拷不了）。
