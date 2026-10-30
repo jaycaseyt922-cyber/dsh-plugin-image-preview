@@ -39,7 +39,8 @@
     "node": ">=20"
   },
   "scripts": {
-    "test": "node test/host-smoke.mjs"
+    "test": "node test/host-smoke.mjs",
+    "release:check": "node test/release-check.mjs"
   },
   "dsh": {
     "bundle": {

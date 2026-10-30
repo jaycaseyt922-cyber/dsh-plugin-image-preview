@@ -191,11 +191,31 @@ powershell -NoProfile -ExecutionPolicy Bypass -File tools\probe.ps1 -Stop
 
 1. 改 `package.json` 的 `version`（预 1.0 用 minor 表达行为变化）。
 2. 在 `CHANGELOG.md` 顶部加一节：Added / Changed / Fixed / Security / Docs。
-3. 本地跑 `npm test` + `node --check index.js; node --check client.js`（CI 也会跑）。
+3. `npm run release:check` —— 一条命令查完：版本与 CHANGELOG 是否一致、语法、宿主测试、打包内容（该带的带、`tools/` 不带）、运行时依赖是否为零。
 4. `git commit` → `git tag vX.Y.Z` → `git push --follow-tags`。
-5. `npm publish`（见上一节）。
+5. `npm publish`（本机手动发，见上一节）；或走仓库的 `publish` workflow（OIDC，见下）。
 
-CI（`.github/workflows/ci.yml`）在 push / PR 上跑：语法、`npm test`（Node 20 与 22）、打包产物检查（必须带 `test/`、不许带 `tools/`）、以及"运行时依赖必须为零"。
+CI（`.github/workflows/ci.yml`）在 push / PR 上跑的就是 `npm run release:check`（Node 20 与 22 双矩阵），本地与 CI 用同一条命令，不会漂。
+
+### 凭据怎么长期持有
+
+原则：**长期凭据不落成明文文件**。这个仓库用到的只有两处。
+
+| 用途 | 推荐做法 | 不要这样做 |
+| --- | --- | --- |
+| 推 GitHub | `gh auth login`（token 进 Windows 凭据管理器，之后 `gh auth setup-git` 让 git 复用它）；或 SSH key（无过期） | 把 PAT 存进 `~/.git-credentials` / `Documents\*.txt` |
+| 发 npm（本机） | `npm login`（浏览器授权），token 落在 `%USERPROFILE%\.npmrc`；用 `icacls` 把该文件收紧到当前用户 | 把 token 写进仓库里的 `.npmrc` |
+| 发 npm（长期/CI） | **trusted publishing（OIDC）**：`.github/workflows/publish.yml` 已备好，只声明 `id-token: write`、不存 token；在 npmjs 包的 Settings → Trusted publishing 里绑定 `repo + publish.yml` | 在仓库 Secrets 里放一个永不过期的 `NPM_TOKEN` |
+
+盘点自己现在是什么状态（都不打印密钥）：
+
+```powershell
+gh auth status                 # GitHub 走的是 gh 凭据？
+npm whoami                     # npm 登录的是谁
+git config --get-all credential.helper   # 有没有 store 之类的明文 helper
+```
+
+`publish.yml` 是**手动触发**（Actions → publish → Run workflow，默认 `dry_run: true` 只演练）。首次发布时 npm 上还没有这个包、OIDC 无处绑定，所以第一次在本机 `npm login` + `npm publish`；发出去之后去包设置里绑定，从此不再需要 token。
 
 ### 宿主版本一变，先查这几处
 

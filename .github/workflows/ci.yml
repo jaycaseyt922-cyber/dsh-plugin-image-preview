@@ -1,6 +1,6 @@
-# 只在有改动时跑：单元测试 + 语法 + 打包产物检查。
-# 注意这里**跑不了**客户端半（需要真实的 Electron 宿主），那部分靠 tools/probe.ps1
-# 在本机手动验，见 README「自测」。
+# 每次 push / PR：一条命令跑完语法、宿主测试、打包产物、零运行时依赖、版本与 CHANGELOG 一致性。
+# 客户端半（client.js 的真实渲染行为）在这里跑不了——需要 Electron 宿主，
+# 靠 tools/probe.ps1 + test/probe-assertions.js 在本机验（见 README「自测」与「维护」）。
 name: ci
 
 on:
@@ -8,6 +8,9 @@ on:
     branches: [master, main]
   pull_request:
   workflow_dispatch:
+
+permissions:
+  contents: read
 
 jobs:
   test:
@@ -21,30 +24,5 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: ${{ matrix.node }}
-      - name: syntax
-        run: |
-          node --check index.js
-          node --check client.js
-          node --check tools/cdp.mjs
-          node --check test/host-smoke.mjs
-          node --check test/probe-assertions.js
-      - name: host tests
-        run: npm test
-      - name: package contents
-        run: |
-          npm pack --dry-run
-          # 发布包必须带 test/（否则装完 npm test 跑不了），且不带 tools/
-          npm pack --json --dry-run > pack.json
-          node -e "
-            const files = require('./pack.json')[0].files.map((f) => f.path);
-            const need = ['index.js','client.js','cordis.patch.yml','README.md','LICENSE','test/host-smoke.mjs'];
-            const bad = files.filter((f) => f.startsWith('tools/'));
-            const missing = need.filter((f) => !files.includes(f));
-            console.log(files.length + ' files');
-            if (missing.length) { console.error('missing: ' + missing.join(', ')); process.exit(1) }
-            if (bad.length) { console.error('tools/ must not ship: ' + bad.join(', ')); process.exit(1) }
-          "
-      - name: no runtime dependencies
-        run: |
-          test -z "$(node -e "const p=require('./package.json');process.stdout.write(Object.keys(p.dependencies||{}).join(''))")" \
-            || (echo "runtime dependencies are not allowed in this plugin" && exit 1)
+      - name: release check
+        run: npm run release:check
