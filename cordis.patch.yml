@@ -1,0 +1,9 @@
+﻿# dsh-plugin-image-preview 自 wiring（dsh.bundle.patch 机制）：安装即注册。
+#
+# 两半同属一行：
+#   host 半（index.js）注册 preview_image 工具与能力公告；
+#   browser 半（client.js，dsh.client 声明）画工具卡、把正文里的裸图片路径变成图片按钮，
+#   并提供全屏查看器。
+- insert:
+    - id: image-preview
+      name: dsh-plugin-image-preview

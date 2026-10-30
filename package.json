@@ -1,0 +1,46 @@
+{
+  "name": "dsh-plugin-image-preview",
+  "version": "0.2.0",
+  "type": "module",
+  "license": "MIT",
+  "description": "Preview local images inside a DeepSeek Harness conversation: bare image paths in prose become thumbnails, a path alone on its line becomes an inline preview, a preview_image tool card shows a gallery, and a full-screen viewer handles zoom, pan, paging and clipboard copy.",
+  "main": "index.js",
+  "exports": {
+    ".": "./index.js",
+    "./client": "./client.js",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "index.js",
+    "client.js",
+    "cordis.patch.yml",
+    "README.md",
+    "LICENSE"
+  ],
+  "keywords": [
+    "dsh-plugin",
+    "deepseek-harness",
+    "dsh",
+    "image",
+    "preview",
+    "lightbox"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "test": "node test/host-smoke.mjs"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "immediately": true,
+      "inject": [
+        "@deepseek-ai/dsh-client-ui-tool"
+      ]
+    }
+  }
+}
