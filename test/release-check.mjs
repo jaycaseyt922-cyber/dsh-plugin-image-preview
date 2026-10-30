@@ -72,7 +72,9 @@ try {
 }
 
 if (failures.length > 0) {
-  console.error(`\nrelease check 失败（${failures.length} 项）`)
+  // 机器可读的一行，方便 CI 把它捞出来做成 annotation（日志本身要鉴权才能下载）。
+  console.error('RELEASE-CHECK-FAILED: ' + JSON.stringify(failures))
+  console.error(`release check 失败（${failures.length} 项）`)
   process.exit(1)
 }
-console.log('\nrelease check 通过')
+console.log('release check 通过')
