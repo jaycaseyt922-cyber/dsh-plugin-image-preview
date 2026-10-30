@@ -5,9 +5,28 @@
 //   node tools/cdp.mjs pages                          # 列出 target
 //
 // 只依赖 Node 内置的 fetch / WebSocket（Node >= 22），不需要 Playwright。
+import { spawnSync } from 'node:child_process'
+import { fileURLToPath } from 'node:url'
+
 const port = Number(process.env.PROBE_CDP_PORT ?? 9333)
 const command = process.argv[2]
 const argument = process.argv[3]
+
+// 探针窗口平时最小化在隐藏桌面上（不渲染、不花 CPU，也看不见）。
+// 截图需要真实帧，所以 shot 前后各调一次 probe.ps1：-Arm 还原、-Idle 收起。
+const probeScript = fileURLToPath(new URL('./probe.ps1', import.meta.url))
+
+function probeWindow(flag) {
+  if (process.platform !== 'win32') return
+  try {
+    spawnSync('powershell', ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', probeScript, flag], {
+      stdio: 'ignore',
+      timeout: 20000,
+    })
+  } catch {}
+}
+
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
 
 const url = `http://127.0.0.1:${port}/json/list`
 
@@ -89,9 +108,23 @@ if (command === 'eval') {
   const value = result.result?.value
   console.log(typeof value === 'string' ? value : JSON.stringify(value, null, 2))
 } else if (command === 'shot') {
-  const result = await send(socket, 'Page.captureScreenshot', { format: 'png', captureBeyondViewport: false })
+  probeWindow('-Arm')
+  await sleep(700)
+  let result
+  try {
+    result = await send(socket, 'Page.captureScreenshot', { format: 'png', captureBeyondViewport: false })
+  } catch (error) {
+    // 最小化的窗口不产帧：截图会一直等到超时，而不是给一张黑图。探针必须在隐藏桌面上
+    // 被还原（-Arm）才有帧可截；这里把话说明白，省得下一个人只看到 "CDP timeout"。
+    throw new Error(
+      'Page.captureScreenshot 失败（' +
+        String(error?.message ?? error) +
+        '）。若探针窗口是最小化状态，先 `probe.ps1 -Arm` 还原；`probe.ps1 -Status` 会显示 iconic=True/False。',
+    )
+  }
   await writeFile(argument ?? 'probe.png', Buffer.from(result.data, 'base64'))
   console.log('saved ' + (argument ?? 'probe.png'))
+  probeWindow('-Idle')
 } else {
   console.error('usage: cdp.mjs eval "<js>" | shot <out.png> | pages')
   process.exit(1)
