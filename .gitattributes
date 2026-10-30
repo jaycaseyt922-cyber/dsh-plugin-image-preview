@@ -1,0 +1,12 @@
+# 统一行尾，避免 Windows 上 core.autocrlf=true 造成的无意义 diff 与警告。
+* text=auto eol=lf
+
+# 二进制/产物不参与行尾转换（*.tgz 另在 .gitignore 里排除）
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.webp binary
+*.avif binary
+*.bmp binary
+*.tgz binary
