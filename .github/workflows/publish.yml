@@ -51,9 +51,30 @@ jobs:
           fi
           exit "$status"
       - name: npm publish
+        # 同上：`run:` 默认 bash -e，先 set +e 才能把失败原因做成 annotation。
         run: |
-          if [ "${{ inputs.dry_run }}" = "true" ]; then
-            npm publish --provenance --access public --dry-run
+          node --version
+          npm --version
+          if [ -n "${ACTIONS_ID_TOKEN_REQUEST_URL:-}" ]; then
+            echo "oidc: available"
           else
-            npm publish --provenance --access public
+            echo "oidc: MISSING (id-token: write / permissions 没生效)"
           fi
+          set +e
+          if [ "${{ inputs.dry_run }}" = "true" ]; then
+            npm publish --provenance --access public --dry-run 2>&1 | tee publish.log
+          else
+            npm publish --provenance --access public 2>&1 | tee publish.log
+          fi
+          status=${PIPESTATUS[0]}
+          set -e
+          if [ "$status" -ne 0 ]; then
+            { grep -Ei 'npm error|EOTP|E403|E404|ENEEDAUTH|provenance|trusted|oidc' publish.log || true; } |
+              head -25 | while IFS= read -r line; do
+                echo "::error title=npm-publish::$line"
+              done
+            tail -20 publish.log | while IFS= read -r line; do
+              echo "::error title=npm-publish-tail::$line"
+            done
+          fi
+          exit "$status"
