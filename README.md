@@ -185,6 +185,38 @@ powershell -NoProfile -ExecutionPolicy Bypass -File tools\probe.ps1 -Stop
 > `tools/` 只在仓库里，`npm pack` 不带它（发布包不该带一个能再起一个应用实例的脚本）。`test/` 是带的，所以 `npm test` 装完能直接跑。
 
 
+## 维护（给自己看的）
+
+### 发一次版
+
+1. 改 `package.json` 的 `version`（预 1.0 用 minor 表达行为变化）。
+2. 在 `CHANGELOG.md` 顶部加一节：Added / Changed / Fixed / Security / Docs。
+3. 本地跑 `npm test` + `node --check index.js; node --check client.js`（CI 也会跑）。
+4. `git commit` → `git tag vX.Y.Z` → `git push --follow-tags`。
+5. `npm publish`（见上一节）。
+
+CI（`.github/workflows/ci.yml`）在 push / PR 上跑：语法、`npm test`（Node 20 与 22）、打包产物检查（必须带 `test/`、不许带 `tools/`）、以及"运行时依赖必须为零"。
+
+### 宿主版本一变，先查这几处
+
+| 会变的东西 | 影响面 | 症状 / 自检 |
+| --- | --- | --- |
+| `tool.call.toolview` 的 props | 工具卡 | 退回通用工具行；`mounts` 里没有 `card-render` |
+| `output.presentationMeta` | 卡片取图来源 | 卡片按参数画图（`dir` 调用会空），工具结果本身正常 |
+| `ctx.webServer.register` / `connection.requestRejection` | 全部取图 | 图全“打不开”；无凭证访问 `/image-preview/file` 不再是 401 |
+| 会话 DOM 的文本节点 / `data-chat-*-key` | 正文装饰、←/→ 翻页范围 | 路径仍是纯文字；翻页退化成整页范围 |
+| client bundle 装配（`__ModuleLoader__`） | 整个 browser 半 | `mounts` 里三步全缺 |
+
+### 什么时候必须验客户端半
+
+改动落在 `client.js` 就必须验；纯 host 改动跑 `npm test` 就够。客户端半**唯一**的自动化入口是 `test/probe-assertions.js`（走探针），别拿肉眼当回归测试。
+
+### 兼容性承诺
+
+- 只承诺 **Windows 盘符路径**（`C:\…` / `C:/…`）；POSIX 路径不在范围内。
+- 宿主版本没有下限声明（`engines` 只管 Node ≥ 20）；契约变化按上表查，不靠猜。
+- 发布包**不带** `tools/`（它会再起一个应用实例），带 `test/`，所以装完能 `npm test`。
+
 ## 发布与分享
 
 本目录已经是一个可直接发布的包：MIT、`files` 白名单 5 个手写条目（含 `test/`，所以装完也能 `npm test`）、`npm pack` ≈ 53 kB（解包 161 kB，11 个文件）、`npm test` 可移植（自带临时素材，不依赖本机路径）。
