@@ -1,4 +1,4 @@
-﻿/**
+/**
  * Browser half of the local image preview plugin.
  *
  * Two surfaces, one full-screen viewer:
@@ -15,9 +15,10 @@
  * cursor, drag to pan, fit/1:1, arrow keys across the images of one message and
  * a manual refresh that busts the host's `no-store` cache.
  *
- * Images come from the host's own `/api/file?path=…` route, the same one the
- * official renderer uses, so nothing has to be re-served and no extra auth is
- * involved.
+ * Images come from this plugin's own host route first (`POST /image-preview/read`
+ * with the path in the JSON body, answered as raw bytes into a `Blob`), then from
+ * the host's `/api/file?path=…`, so nothing has to be re-served and no extra auth
+ * is involved.
  *
  * @module dsh-plugin-image-preview/client
  */
@@ -64,7 +65,7 @@ window.__ModuleLoader__.load({
   margin: 0 2px;
   padding: 0;
   overflow: hidden;
-  border: 1px solid color-mix(in srgb, currentColor 18%, transparent);
+  border: 1px solid var(--dsw-alias-border-l1, color-mix(in srgb, currentColor 18%, transparent));
   border-radius: 5px;
   background:
     repeating-conic-gradient(color-mix(in srgb, currentColor 6%, transparent) 0% 25%, transparent 0% 50%) 0 0 / 12px 12px,
@@ -74,10 +75,10 @@ window.__ModuleLoader__.load({
   cursor: zoom-in;
 }
 .dsh-ip-chip:hover {
-  border-color: color-mix(in srgb, currentColor 45%, transparent);
+  border-color: var(--dsw-alias-border-l2, color-mix(in srgb, currentColor 45%, transparent));
 }
 .dsh-ip-chip:focus-visible {
-  outline: 2px solid currentColor;
+  outline: 2px solid var(--dsw-alias-brand-primary, currentColor);
   outline-offset: 1px;
 }
 .dsh-ip-chip img {
@@ -106,14 +107,14 @@ window.__ModuleLoader__.load({
   cursor: zoom-in;
 }
 .dsh-ip-figure:focus-visible {
-  outline: 2px solid currentColor;
+  outline: 2px solid var(--dsw-alias-brand-primary, currentColor);
   outline-offset: 2px;
 }
 .dsh-ip-figure img {
   display: block;
   max-width: min(560px, 100%);
   max-height: 320px;
-  border: 1px solid color-mix(in srgb, currentColor 16%, transparent);
+  border: 1px solid var(--dsw-alias-border-l1, color-mix(in srgb, currentColor 16%, transparent));
   border-radius: 6px;
   background:
     repeating-conic-gradient(color-mix(in srgb, currentColor 6%, transparent) 0% 25%, transparent 0% 50%) 0 0 / 16px 16px,
@@ -123,8 +124,18 @@ window.__ModuleLoader__.load({
   display: block;
   margin-top: 3px;
   font-size: 11px;
-  opacity: 0.55;
+  color: var(--dsw-alias-label-secondary, inherit);
+  opacity: 0.85;
   font-variant-numeric: tabular-nums;
+}
+/* 整块只剩图片路径时，把原始路径那行藏起来：图已经说明一切。
+   只改样式、不切文本节点，所以 React 拥有的文本节点保持完整，路径仍可选中复制。 */
+[data-ip-hide-path="1"] {
+  font-size: 0;
+  line-height: 0;
+}
+[data-ip-hide-path="1"] > br {
+  display: none;
 }
 .dsh-ip-hover {
   position: fixed;
@@ -132,9 +143,10 @@ window.__ModuleLoader__.load({
   display: none;
   max-width: 360px;
   padding: 5px;
+  border: 1px solid var(--dsw-alias-border-l2, rgba(255, 255, 255, 0.18));
   border-radius: 8px;
-  background: rgba(16, 18, 24, 0.92);
-  box-shadow: 0 12px 32px rgba(0, 0, 0, 0.34);
+  background: var(--dsw-alias-bg-overlay, rgba(16, 18, 24, 0.92));
+  box-shadow: 0 12px 32px color-mix(in srgb, var(--dsw-alias-label-primary, #000) 22%, transparent);
   pointer-events: none;
 }
 .dsh-ip-hover img {
@@ -145,9 +157,9 @@ window.__ModuleLoader__.load({
 }
 .dsh-ip-hover-cap {
   padding: 3px 3px 0;
-  color: #fff;
+  color: var(--dsw-alias-label-secondary, inherit);
   font-size: 11px;
-  opacity: 0.72;
+  opacity: 0.9;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -410,6 +422,11 @@ window.__ModuleLoader__.load({
      * failed fetch carries the HTTP status that explains the failure.
      */
     const blobUrls = new Map()
+    /** Bound the URL-fallback cache too: it holds whole pictures as object URLs. */
+    const BLOB_URL_LIMIT = 32
+
+    /** How many URL fallbacks one picture may try before it gives up. */
+    const FALLBACK_LIMIT = 12
 
     /**
      * Resolve one URL to a blob URL, caching successes and forgetting failures.
@@ -435,7 +452,20 @@ window.__ModuleLoader__.load({
       })
       task.catch(() => blobUrls.delete(url))
       blobUrls.set(url, task)
+      if (blobUrls.size > BLOB_URL_LIMIT) {
+        const oldest = blobUrls.keys().next()
+        if (oldest.done !== true) {
+          releaseEntry(blobUrls.get(oldest.value))
+          blobUrls.delete(oldest.value)
+        }
+      }
       return task
+    }
+
+    /** Drop every URL-fallback blob (plugin unload). */
+    function releaseBlobUrls() {
+      for (const task of blobUrls.values()) releaseEntry(task)
+      blobUrls.clear()
     }
 
     /**
@@ -443,71 +473,189 @@ window.__ModuleLoader__.load({
      *
      * The path never enters the URL here: whatever the desktop shell does to a
      * URL, the JSON body is untouched, so this is the transport that survives a
-     * re-encoding proxy.
+     * re-encoding proxy. The answer is read as raw bytes into a `Blob`, so the
+     * page never holds a base64 copy of the picture: an `<img>` points at the
+     * object URL, and the bytes leave memory with the URL.
      * @param {string} file - the absolute local path.
-     * @returns {Promise<{ url: string, asked: string, bytes: number }>} a data URL.
+     * @returns {Promise<{ url: string, asked: string, bytes: number }>} a blob URL.
      */
-    async function readViaHost(file) {
+    async function readOnce(file) {
       const url = new URL('image-preview/read', document.baseURI).href
       const abort = typeof AbortController === 'function' ? new AbortController() : null
-      const timer = abort === null ? null : setTimeout(() => abort.abort(), 5000)
+      // The timer covers the whole exchange, body included: a header-only
+      // timeout used to leave the body free to hang for minutes.
+      const timer = abort === null ? null : setTimeout(() => abort.abort(), 20000)
       let response
+      let blob
       try {
         response = await fetch(url, {
           method: 'POST',
           credentials: 'same-origin',
-          headers: { 'content-type': 'application/json' },
+          headers: { 'content-type': 'application/json', accept: 'application/octet-stream' },
           body: JSON.stringify({ path: file }),
           signal: abort === null ? undefined : abort.signal,
         })
+        if (response.ok !== true) {
+          // A refused read is answered as JSON: keep the host's own reason, not the
+          // raw envelope (the chip only has room for a few characters).
+          let detail = ''
+          try {
+            const body = (await response.text()).trim()
+            let reason = ''
+            try {
+              const parsed = JSON.parse(body)
+              if (parsed !== null && typeof parsed?.reason === 'string') reason = parsed.reason
+            } catch {
+              /* not JSON: fall back to the body itself */
+            }
+            detail = (reason === '' ? body : reason).replace(/\s+/gu, ' ').slice(0, 160)
+          } catch {
+            /* the body is not readable */
+          }
+          throw new Error('HTTP ' + response.status + (detail === '' ? '' : ' · ' + detail))
+        }
+        const mediaType = response.headers.get('content-type') ?? ''
+        if (mediaType.includes('application/json')) {
+          // An older host answers base64 whatever was asked for.
+          const payload = await response.json()
+          if (payload?.ok !== true || typeof payload.base64 !== 'string') {
+            throw new Error('宿主返回的图片数据不完整')
+          }
+          const binary = atob(payload.base64)
+          const bytes = new Uint8Array(binary.length)
+          for (let index = 0; index < binary.length; index += 1) bytes[index] = binary.charCodeAt(index)
+          blob = new Blob([bytes], { type: typeof payload.mediaType === 'string' ? payload.mediaType : 'image/png' })
+        } else {
+          blob = await response.blob()
+        }
+        if (blob.size === 0) throw new Error('空响应')
       } catch (error) {
+        if (error instanceof Error && error.message.startsWith('HTTP ')) throw error
         const message = String((error instanceof Error ? error.message : error) || '未知原因')
         throw new Error('POST 请求失败：' + message)
       } finally {
         if (timer !== null) clearTimeout(timer)
       }
-      const text = await response.text()
-      let payload = null
-      try {
-        payload = JSON.parse(text)
-      } catch {
-        payload = null
-      }
-      if (response.ok !== true || payload === null || payload.ok !== true) {
-        const reason = payload !== null && typeof payload.reason === 'string' ? payload.reason : text.slice(0, 120)
-        throw new Error('HTTP ' + response.status + (reason === '' ? '' : ' · ' + reason))
-      }
-      if (typeof payload.base64 !== 'string' || typeof payload.mediaType !== 'string') {
-        throw new Error('宿主返回的图片数据不完整')
-      }
-      return {
-        url: 'data:' + payload.mediaType + ';base64,' + payload.base64,
-        asked: typeof payload.asked === 'string' ? payload.asked : file,
-        bytes: Number(payload.bytes) || 0,
-      }
+      return { url: URL.createObjectURL(blob), asked: file, bytes: blob.size }
     }
 
-    /** Why the POST route failed, for the viewer's diagnostics. */
-    let lastPostError = ''
+    /** How many byte reads may be in flight at once, so a gallery cannot spike the renderer. */
+    const READ_CONCURRENCY = 3
+    let activeReads = 0
+    const readQueue = []
+
+    /**
+     * Run one read once fewer than READ_CONCURRENCY others are running.
+     * @param {() => Promise<unknown>} run - the read to admit.
+     * @returns {Promise<unknown>} its result.
+     */
+    function withReadSlot(run) {
+      return new Promise((resolve, reject) => {
+        const start = () => {
+          activeReads += 1
+          run()
+            .then(resolve, reject)
+            .finally(() => {
+              activeReads -= 1
+              const next = readQueue.shift()
+              if (next !== undefined) next()
+            })
+        }
+        if (activeReads < READ_CONCURRENCY) start()
+        else readQueue.push(start)
+      })
+    }
+
+    /** Release one cached blob URL when its entry leaves the cache. */
+    function releaseEntry(task) {
+      Promise.resolve(task)
+        .then((value) => {
+          const url = typeof value?.url === 'string' ? value.url : ''
+          if (url.startsWith('blob:') !== true) return
+          // A picture that is on screen right now still points at this object URL:
+          // revoking it blanks the image on the next re-layout. Let it die with the
+          // page instead.
+          if (document.querySelector('img[src="' + cssEscape(url) + '"]') !== null) return
+          URL.revokeObjectURL(url)
+        })
+        .catch(() => {})
+    }
+
+    /**
+     * The bytes of one file, shared between every surface that shows it.
+     *
+     * A path is usually shown more than once — the chip in the prose, the figure
+     * under it, the card's thumbnail, the hover preview, the viewer — and each
+     * surface used to POST the same file again, so one picture could cost five
+     * transfers of its own bytes. The key carries the viewer's refresh stamp, so
+     * "刷新" still reads the file again.
+     */
+    const readCache = new Map()
+    const READ_CACHE_LIMIT = 32
+    /** Pictures above this size are shown but not retained: a cache is not a hoard. */
+    const READ_RETAIN_LIMIT = 16 * 1024 * 1024
+
+    /**
+     * Resolve one file's bytes through the host, once per (path, refresh).
+     * @param {string} file - the absolute local path.
+     * @param {number} [bust] - the viewer's refresh stamp.
+     * @returns {Promise<{ url: string, asked: string, bytes: number }>} a blob URL.
+     */
+    function readViaHost(file, bust) {
+      const key = file + '\u0000' + (bust === undefined || bust === 0 ? '' : String(bust))
+      const cached = readCache.get(key)
+      if (cached !== undefined) return cached
+      const task = withReadSlot(() => readOnce(file))
+      readCache.set(key, task)
+      if (readCache.size > READ_CACHE_LIMIT) {
+        const oldest = readCache.keys().next()
+        if (oldest.done !== true) {
+          releaseEntry(readCache.get(oldest.value))
+          readCache.delete(oldest.value)
+        }
+      }
+      // A 30 MB scan is worth showing and not worth pinning in the renderer for
+      // the rest of the session; the entry still answers its own callers.
+      task.then((value) => {
+        if ((Number(value?.bytes) || 0) > READ_RETAIN_LIMIT && readCache.get(key) === task) {
+          releaseEntry(task)
+          readCache.delete(key)
+        }
+      }, () => readCache.delete(key))
+      return task
+    }
+
+    /** Drop every cached blob (plugin unload, or a page that is going away). */
+    function releaseReadCache() {
+      for (const task of readCache.values()) releaseEntry(task)
+      readCache.clear()
+    }
 
     /**
      * Every source for one file: the host's POST answer first, then URL routes.
      * @param {string} file - the absolute local path.
      * @param {number} [bust] - a cache-busting stamp.
-     * @returns {Promise<string[]>} candidate sources.
+     * @returns {Promise<{ list: string[], postError: string }>} candidate sources and the POST failure, when there was one.
      */
     async function sourcesFor(file, bust) {
       const list = []
+      let postError = ''
       try {
-        const read = await readViaHost(file)
+        const read = await readViaHost(file, bust)
         if (typeof read.url === 'string' && read.url !== '') list.push(read.url)
-        lastPostError = ''
       } catch (error) {
-        lastPostError = String((error instanceof Error ? error.message : error) || '未知原因')
-        console.warn('[image-preview] POST 取图失败：' + lastPostError)
+        // Kept per call: one failing picture must not describe another one's failure.
+        postError = String((error instanceof Error ? error.message : error) || '未知原因')
+        console.warn('[image-preview] POST 取图失败：' + postError)
       }
-      for (const url of imageSourceCandidates(file, bust)) list.push(url)
-      return list
+      // A 404 from the host's own read route is a verdict about the file itself
+      // (gone, not a bitmap, wrong extension), and every other route runs the same
+      // check — trying twenty of them only buys twenty more failing requests. A
+      // trust or transport failure is different: that can differ per route.
+      const settled = postError.startsWith('HTTP 404')
+      const fallbacks = imageSourceCandidates(file, bust)
+      for (const url of settled === true ? [] : fallbacks.slice(0, FALLBACK_LIMIT)) list.push(url)
+      return { list, postError }
     }
 
     /**
@@ -520,8 +668,11 @@ window.__ModuleLoader__.load({
      */
     async function attachImage(image, file, onFail, bust) {
       let urls = []
+      let postError = ''
       try {
-        urls = await sourcesFor(file, bust)
+        const sources = await sourcesFor(file, bust)
+        urls = sources.list
+        postError = sources.postError
       } catch {
         urls = imageSourceCandidates(file, bust)
       }
@@ -531,10 +682,12 @@ window.__ModuleLoader__.load({
         const url = urls[cursor]
         cursor += 1
         if (url === undefined) {
-          onFail(reason === '' ? lastPostError || '没有可用的取图地址' : reason)
+          onFail(reason === '' ? postError || '没有可用的取图地址' : reason)
           return
         }
-        if (url.startsWith('data:') === true) {
+        // A blob URL and a data URL are already one picture in memory: nothing
+        // left to fetch, so a failure here is a decode failure.
+        if (url.startsWith('data:') === true || url.startsWith('blob:') === true) {
           image.onerror = () => {
             reason = '宿主返回的字节解不成图片'
             next()
@@ -566,27 +719,48 @@ window.__ModuleLoader__.load({
       return parts[parts.length - 1] || String(file)
     }
 
+    /** Cancel handles for elements that are still waiting to enter the viewport. */
+    const waiting = new WeakMap()
+
     /**
      * Run one loader once its element is near the viewport, so a long transcript
      * does not fetch every thumbnail up front.
      * @param {Element} element - the element to watch.
      * @param {() => void} run - the loader.
+     * @returns {() => void} a cancel handle; call it when the element goes away
+     * before it was ever visible, otherwise the observer holds it forever.
      */
     function whenVisible(element, run) {
       if (typeof IntersectionObserver !== 'function') {
         run()
-        return
+        return () => {}
       }
+      let fired = false
       const observer = new IntersectionObserver((entries) => {
         for (const entry of entries) {
-          if (entry.isIntersecting === true) {
-            observer.disconnect()
-            run()
-            return
-          }
+          if (entry.isIntersecting !== true) continue
+          fired = true
+          observer.disconnect()
+          waiting.delete(element)
+          run()
+          return
         }
       }, { rootMargin: '300px' })
       observer.observe(element)
+      const stop = () => {
+        if (fired) return
+        fired = true
+        observer.disconnect()
+        waiting.delete(element)
+      }
+      waiting.set(element, stop)
+      return stop
+    }
+
+    /** Stop waiting on one element that is being taken out of the document. */
+    function dropWaiting(element) {
+      const stop = waiting.get(element)
+      if (stop !== undefined) stop()
     }
 
     /** Keep the first occurrence of every path, in order. */    function unique(list) {
@@ -635,6 +809,10 @@ window.__ModuleLoader__.load({
       let tried = []
       let loadToken = 0
       let showToken = 0
+      /** This picture's POST failure, not whichever one finished last. */
+      let postFailure = ''
+      /** The element to give the keyboard back to when the overlay closes. */
+      let returnFocus = null
 
       /** Clamp the scale to the viewer's bounds. */
       const clamp = (value) => Math.min(MAX_SCALE, Math.max(MIN_SCALE, value))
@@ -685,19 +863,22 @@ window.__ModuleLoader__.load({
       /** Give up on the current picture and say precisely why. */
       function failed() {
         if (image === null || message === null) return
+        const stamp = showToken
         image.style.display = 'none'
         const recent = tried.slice(-3).join('\n')
         message.textContent =
           '打不开这张图片：' + (paths[index] || '') +
           (lastError === '' ? '' : '\n' + lastError) +
-          (lastPostError === '' ? '' : '\nPOST：' + lastPostError) +
+          (postFailure === '' ? '' : '\nPOST：' + postFailure) +
           (lastUrl === '' ? '' : '\n' + lastUrl) +
           (recent === '' ? '' : '\n试过：\n' + recent) +
           '\nbase=' + document.baseURI
         // Ask the host what it sees for this path; the answer names the side at fault.
+        // The answer arrives later, so it must not land on a picture the reader has
+        // already paged away from.
         const file = paths[index]
         if (file !== undefined) diagLine(file).then((line) => {
-          if (message !== null) message.textContent += '\n' + line
+          if (message !== null && stamp === showToken) message.textContent += '\n' + line
         })
       }
 
@@ -734,6 +915,15 @@ window.__ModuleLoader__.load({
         }
         image.onerror = () => {
           if (token !== loadToken) return
+          // A blob or data source is already one picture in memory: there is
+          // nothing left to fetch, so this is a decode failure.
+          if (url.startsWith('blob:') === true || url.startsWith('data:') === true) {
+            lastError = '取到了字节但解不成图片'
+            tried.push('内存字节 → ' + lastError)
+            cursor += 1
+            attempt()
+            return
+          }
           // Some image requests die where a plain fetch succeeds: read the bytes
           // ourselves, and keep the HTTP status as the explanation when that fails.
           toBlobUrl(url).then(
@@ -786,9 +976,11 @@ window.__ModuleLoader__.load({
         lastError = ''
         lastUrl = ''
         tried = []
+        postFailure = ''
         const sources = await sourcesFor(file, bust)
         if (stamp !== showToken) return
-        candidates = sources
+        postFailure = sources.postError
+        candidates = sources.list
         if (candidates.length === 0) {
           image.style.display = 'none'
           message.textContent = '这个路径不能直接预览：' + file
@@ -855,6 +1047,13 @@ window.__ModuleLoader__.load({
         bust = 0
         natural = { width: 0, height: 0 }
         if (!root.isConnected) document.body.appendChild(root)
+        // Remember where the keyboard came from, and never stack two hooks on one
+        // overlay (a second open would make every arrow key step twice).
+        if (keyHandler !== null) {
+          document.removeEventListener('keydown', keyHandler, true)
+        } else {
+          returnFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null
+        }
         root.style.display = 'flex'
         keyHandler = (event) => {
           if ((event.ctrlKey === true || event.metaKey === true) && (event.key === 'c' || event.key === 'C')) {
@@ -910,7 +1109,7 @@ window.__ModuleLoader__.load({
         show(at)
       }
 
-      /** Close the overlay and drop the keyboard hook. */
+      /** Close the overlay, drop the keyboard hook and give the focus back. */
       function close() {
         if (root === null) return
         root.style.display = 'none'
@@ -922,6 +1121,13 @@ window.__ModuleLoader__.load({
           image.onerror = null
           image.onload = null
           image.removeAttribute('src')
+        }
+        // The overlay took the focus; a keyboard reader must land back on the
+        // thumbnail they opened it from, not at the top of the document.
+        const target = returnFocus
+        returnFocus = null
+        if (target !== null && target.isConnected === true && typeof target.focus === 'function') {
+          target.focus({ preventScroll: true })
         }
       }
 
@@ -944,10 +1150,21 @@ window.__ModuleLoader__.load({
       /** Create the overlay DOM on first use. */
       function ensure() {
         if (root !== null) return
+        // Same reason as the hover float: never leave two viewers in one document.
+        for (const stray of document.querySelectorAll('.dsh-ipv-root')) stray.remove()
         root = document.createElement('div')
         root.className = 'dsh-ipv-root'
         root.tabIndex = -1
         root.dataset.ipViewer = '1'
+        // A full-screen overlay is a modal dialog for assistive technology: say so,
+        // or a screen reader keeps reading the conversation underneath it.
+        root.setAttribute('role', 'dialog')
+        root.setAttribute('aria-modal', 'true')
+        root.setAttribute('aria-label', '图片查看器')
+        // Mark it as ours too: an absolute path inside a failure message must not
+        // be decorated by this very plugin (that put a thumbnail inside the
+        // viewer's own error text and cost one extra read per failure).
+        root.dataset.ipOwn = '1'
         root.style.display = 'none'
         root.addEventListener('pointerdown', (event) => event.stopPropagation())
         root.addEventListener('click', (event) => event.stopPropagation())
@@ -967,6 +1184,8 @@ window.__ModuleLoader__.load({
           element.className = 'dsh-ipv-btn'
           element.textContent = label
           element.title = title
+          // `‹` and `›` are the accessible name otherwise, which reads as nothing.
+          element.setAttribute('aria-label', title)
           element.addEventListener('click', (event) => {
             event.preventDefault()
             event.stopPropagation()
@@ -1013,6 +1232,9 @@ window.__ModuleLoader__.load({
         picture.alt = ''
         const messageElement = document.createElement('div')
         messageElement.className = 'dsh-ipv-message'
+        // Failure explanations and the copy/reload confirmations are announced.
+        messageElement.setAttribute('role', 'status')
+        messageElement.setAttribute('aria-live', 'polite')
         stageElement.append(picture, messageElement)
         stage = stageElement
         image = picture
@@ -1089,6 +1311,15 @@ window.__ModuleLoader__.load({
 
     /** Per-text-node decoration state, so a re-render never duplicates a chip. */
     const decorations = new WeakMap()
+    /**
+     * Which state currently owns each inserted element.
+     *
+     * A re-render replaces the text node while its picture survives; the new node
+     * adopts that picture, but the old node's state still lists it. Without this
+     * index, pruning the old node removed the adopted picture — leaving a block
+     * whose path text was hidden with no picture in it.
+     */
+    const owners = new WeakMap()
 
     /**
      * Decorate one text node with thumbnails for the image paths it mentions.
@@ -1121,7 +1352,10 @@ window.__ModuleLoader__.load({
       // A path that scrolled out of the text (a re-render shortened the run) loses its picture.
       for (const [file, element] of Array.from(state.items)) {
         if (wanted.includes(file)) continue
-        element.remove()
+        if ((owners.get(element) ?? state) === state) {
+          dropWaiting(element)
+          element.remove()
+        }
         state.items.delete(file)
       }
       let anchor = state.anchor !== null && state.anchor.isConnected ? state.anchor : node
@@ -1135,6 +1369,7 @@ window.__ModuleLoader__.load({
         if (adopted !== null) {
           anchor = adopted
           state.items.set(file, adopted)
+          owners.set(adopted, state)
           continue
         }
         const element = standalonePath(node, file) ? figureFor(file) : chipFor(file)
@@ -1142,18 +1377,31 @@ window.__ModuleLoader__.load({
         parent.insertBefore(element, anchor.nextSibling)
         anchor = element
         state.items.set(file, element)
+        owners.set(element, state)
       }
       state.anchor = anchor
       if (state.items.size === 0) decorations.delete(node)
       else decorations.set(node, state)
+      updatePathVisibility(node.parentElement)
     }
 
     /** Remove every decoration this plugin added for one text node. */
     function dropDecorations(node) {
       const state = decorations.get(node)
-      if (state === undefined) return
-      for (const element of state.items.values()) element.remove()
-      decorations.delete(node)
+      if (state !== undefined) {
+        for (const element of state.items.values()) {
+          // A picture adopted by another (newer) text node belongs to that node now:
+          // removing it here is what left a hidden block with no picture in it.
+          if ((owners.get(element) ?? state) !== state) continue
+          dropWaiting(element)
+          element.remove()
+        }
+        decorations.delete(node)
+      }
+      // Always re-evaluate the block: a path that left the text must also drop the
+      // `data-ip-hide-path` that was hiding the raw path line, or a paragraph whose
+      // picture went away stays invisible for good.
+      updatePathVisibility(node.parentElement)
     }
 
     /**
@@ -1216,7 +1464,9 @@ window.__ModuleLoader__.load({
       chip.appendChild(img)
       whenVisible(chip, () => {
         attachImage(img, file, (reason) => {
-          chip.replaceChildren(failedLabel(baseName(file) + '：' + reason))
+          // The chip is 46×34: show the reason, keep the full path in the tooltip.
+          chip.title = '打不开：' + file + '\n' + reason
+          chip.replaceChildren(failedLabel(reason))
         })
       })
       chip.addEventListener('click', (event) => {
@@ -1250,7 +1500,8 @@ window.__ModuleLoader__.load({
       figure.append(img, caption)
       whenVisible(figure, () => {
         attachImage(img, file, (reason) => {
-          figure.replaceChildren(failedLabel(baseName(file) + '：' + reason))
+          figure.title = '打不开：' + file + '\n' + reason
+          figure.replaceChildren(failedLabel(baseName(file) + '：' + reason, 60))
         })
       })
       figure.addEventListener('click', (event) => {
@@ -1261,12 +1512,60 @@ window.__ModuleLoader__.load({
       return figure
     }
 
-    /** A small "this one will not open" label. */
-    function failedLabel(text) {
+    /**
+     * A small "this one will not open" label.
+     * @param {string} text - what to show.
+     * @param {number} [limit] - how many characters fit.
+     * @returns {HTMLSpanElement} the label.
+     */
+    function failedLabel(text, limit = 24) {
       const span = document.createElement('span')
       span.className = 'dsh-ip-chip-failed'
-      span.textContent = '打不开 ' + String(text).slice(0, 24)
+      span.textContent = '打不开 ' + String(text).slice(0, limit)
       return span
+    }
+
+    /**
+     * Whether a block holds nothing but image paths and punctuation.
+     *
+     * Such a block is now a picture, so its raw path line is noise: the reader
+     * gains nothing from `C:/Users/…/fig.png` above the figure it already sees.
+     * @param {Element | null} parent - the block that holds the text.
+     * @returns {boolean} true when nothing but paths, punctuation and whitespace remain.
+     */
+    function blockIsOnlyPaths(parent) {
+      if (parent === null) return false
+      for (const child of parent.childNodes) {
+        if (child.nodeType === 3) {
+          const rest = String(child.nodeValue)
+            .replace(PATH_RE, '')
+            .replace(/[\s。，、；：！？·—…,.!?;:）】」》〉"'"]/gu, '')
+          if (rest !== '') return false
+          continue
+        }
+        if (child.nodeType !== 1) continue
+        if (child.tagName === 'BR') continue
+        // Our own chip/figure/caption does not count as leftover text.
+        if (child.dataset !== undefined && child.dataset.ipOwn !== undefined) continue
+        return false
+      }
+      return true
+    }
+
+    /**
+     * Hide a block's raw path text once every path in it is drawn, and restore it
+     * when the pictures go away.
+     *
+     * This only sets an attribute on the block: the text node React owns is never
+     * split or rewritten, so the path stays selectable and copyable, and a
+     * re-render cannot leave a dangling reference behind.
+     * @param {Element | null} parent - the block that holds decorated text.
+     */
+    function updatePathVisibility(parent) {
+      if (parent === null || parent.dataset === undefined || parent.dataset === null) return
+      const drawn = parent.querySelector('[data-ip-path]') !== null
+      if (drawn === true && blockIsOnlyPaths(parent) === true) parent.dataset.ipHidePath = '1'
+      else if (parent.dataset.ipHidePath !== undefined) delete parent.dataset.ipHidePath
     }
 
     /** Escape one value for an attribute selector without depending on CSS.escape. */
@@ -1306,6 +1605,10 @@ window.__ModuleLoader__.load({
       /** Build the floating box on first use. */
       function ensure() {
         if (root !== null) return
+        // A second evaluation of this bundle can leave its float behind, and then
+        // one pointer would be answered by two overlays (the stale one hiding the
+        // live one). The newest instance owns the page.
+        for (const stray of document.querySelectorAll('.dsh-ip-hover')) stray.remove()
         root = document.createElement('div')
         root.className = 'dsh-ip-hover'
         root.dataset.ipOwn = '1'
@@ -1424,8 +1727,23 @@ window.__ModuleLoader__.load({
       const schedule = () => {
         if (scheduled || stopped) return
         scheduled = true
-        if (typeof requestAnimationFrame === 'function') requestAnimationFrame(flush)
-        else setTimeout(flush, 30)
+        if (typeof requestAnimationFrame !== 'function') {
+          setTimeout(flush, 30)
+          return
+        }
+        // A hidden or minimized window stops requestAnimationFrame outright, and then
+        // a transcript that streamed in the background stays undecorated until the
+        // window comes back. The timer is the safety net: whichever fires first wins
+        // and `flush` is idempotent.
+        let timer = null
+        const frame = requestAnimationFrame(() => {
+          if (timer !== null) clearTimeout(timer)
+          flush()
+        })
+        timer = setTimeout(() => {
+          if (typeof cancelAnimationFrame === 'function') cancelAnimationFrame(frame)
+          flush()
+        }, 250)
       }
 
       const collect = (node) => {
@@ -1469,8 +1787,12 @@ window.__ModuleLoader__.load({
       // A sweep for text the mutation stream missed (a virtualized row that
       // arrived without an observable insertion, a host re-render that reused
       // nodes): the decoration is idempotent, so re-scanning is safe.
+      //
+      // It is a whole-document walk, so it only runs while somebody can see the
+      // window, and rarely: the observer already covers streaming text, and a
+      // background window has no reason to burn a walk every few seconds.
       const sweep = setInterval(() => {
-        if (stopped) return
+        if (stopped || document.visibilityState === 'hidden') return
         try {
           const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT)
           let count = 0
@@ -1484,11 +1806,31 @@ window.__ModuleLoader__.load({
         } catch {
           /* an unreadable document simply gets no sweep */
         }
-      }, 4000)
+      }, 15000)
       if (typeof sweep.unref === 'function') sweep.unref()
+      // Coming back to the window is the moment a missed row becomes visible, so
+      // one sweep right then is worth more than the idle timer.
+      const onVisible = () => {
+        if (document.visibilityState !== 'visible' || stopped) return
+        try {
+          const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT)
+          let count = 0
+          for (let text = walker.nextNode(); text !== null && count < 1500; text = walker.nextNode()) {
+            count += 1
+            if (text.nodeValue === null || text.nodeValue.length < 6) continue
+            if (text.nodeValue.search(PATH_RE) < 0) continue
+            pending.add(text)
+          }
+          if (pending.size > 0) schedule()
+        } catch {
+          /* nothing to sweep */
+        }
+      }
+      document.addEventListener('visibilitychange', onVisible)
       ctx.effect(() => () => {
         stopped = true
         clearInterval(sweep)
+        document.removeEventListener('visibilitychange', onVisible)
         observer.disconnect()
         pending.clear()
       })
@@ -1510,6 +1852,27 @@ window.__ModuleLoader__.load({
     // ------------------------------ the tool card ------------------------------
 
     /**
+     * Unwrap one argument carrier into plain arguments.
+     *
+     * `block.args` is a plain object on a settled call, but a still-streaming call
+     * hands over a `PartialArguments` reader (`chunks` / `object` / `sealed`)
+     * whose own fields look nothing like the tool's arguments. Treating the
+     * reader as arguments is why the card said "准备中…" until the very end and
+     * why a mount report could read `k=chunks.object.sealed`.
+     * @param {unknown} value - one candidate argument carrier.
+     * @returns {object | null} the parsed arguments, or null when there are none.
+     */
+    function plainArgs(value) {
+      if (value === null || typeof value !== 'object') return null
+      if (Array.isArray(value.chunks) || typeof value.sealed === 'boolean') {
+        const parsed = value.object
+        if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) return null
+        return parsed
+      }
+      return value
+    }
+
+    /**
      * The `preview_image` arguments, tolerant of every lifecycle stage.
      * @param {object | undefined} call - the phase payload the tool slot passes.
      * @returns {object} the arguments seen so far, or an empty object.
@@ -1521,9 +1884,13 @@ window.__ModuleLoader__.load({
       // place the arguments may sit and keep the first one that carries a path.
       const found = []
       if (block.call !== undefined && block.call !== null && block.call.args !== undefined && block.call.args !== null) {
-        if (typeof block.call.args === 'object') found.push(block.call.args)
+        const args = plainArgs(block.call.args)
+        if (args !== null) found.push(args)
       }
-      if (block.args !== undefined && block.args !== null && typeof block.args === 'object') found.push(block.args)
+      if (block.args !== undefined && block.args !== null) {
+        const args = plainArgs(block.args)
+        if (args !== null) found.push(args)
+      }
       for (const raw of [block.argsRaw, block.call?.argsRaw]) {
         if (typeof raw !== 'string' || raw.trim() === '') continue
         try {
@@ -1539,8 +1906,21 @@ window.__ModuleLoader__.load({
       return found[0] ?? {}
     }
 
-    /** The image paths one call asked for. */
+    /** The image paths one call asked for, or the ones its settled result names. */
     function toolPaths(call) {
+      // A `dir` call never names its pictures in the arguments: the host expands the
+      // directory and records the answer as result metadata. Prefer that, so the
+      // card paints what the call produced instead of "没有可显示的图片。" on a
+      // call that plainly did produce pictures.
+      const meta = call?.block?.meta
+      if (meta !== null && typeof meta === 'object' && Array.isArray(meta.images)) {
+        const stated = []
+        for (const entry of meta.images) {
+          const file = typeof entry === 'string' ? entry : entry !== null && typeof entry === 'object' && typeof entry.path === 'string' ? entry.path : ''
+          if (file !== '') stated.push(file)
+        }
+        if (stated.length > 0) return unique(stated).slice(0, 24)
+      }
       const args = toolArgs(call)
       const list = []
       if (Array.isArray(args.paths)) list.push(...args.paths)
@@ -1558,12 +1938,21 @@ window.__ModuleLoader__.load({
         if (node === null) return () => {}
         setPhase('loading')
         setReason('')
-        node.onload = () => setPhase('ok')
-        attachImage(node, file, (why) => {
-          setReason(why)
-          setPhase('failed')
+        // A card can hold 24 pictures: fetching them all on mount is what turned
+        // one gallery into 24 simultaneous reads. Fetch a thumbnail when it is
+        // about to be seen, and cancel the wait when the card unmounts first.
+        let cancelled = false
+        const stop = whenVisible(node, () => {
+          if (cancelled) return
+          node.onload = () => setPhase('ok')
+          attachImage(node, file, (why) => {
+            setReason(why)
+            setPhase('failed')
+          })
         })
         return () => {
+          cancelled = true
+          stop()
           node.onerror = null
           node.onload = null
         }
@@ -1742,6 +2131,12 @@ window.__ModuleLoader__.load({
       try {
         ctx.effect(() => () => viewer.destroy())
         ctx.effect(() => () => hover.destroy())
+        // Every cached picture is an object URL: letting the plugin unload without
+        // revoking them would leak the whole conversation's images.
+        ctx.effect(() => () => {
+          releaseReadCache()
+          releaseBlobUrls()
+        })
       } catch (error) {
         report('effects-failed', error)
       }

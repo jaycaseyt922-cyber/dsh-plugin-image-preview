@@ -1,4 +1,4 @@
-﻿/**
+/**
  * Host half of the local image preview plugin.
  *
  * Two surfaces:
@@ -21,7 +21,8 @@
  * @module dsh-plugin-image-preview
  */
 
-import { closeSync, openSync, readSync, readdirSync, readFileSync, statSync } from 'node:fs'
+import { closeSync, createReadStream, openSync, readSync, readFileSync, statSync } from 'node:fs'
+import { readdir, stat } from 'node:fs/promises'
 import path from 'node:path'
 
 /** Stable cordis plugin name. */
@@ -35,8 +36,8 @@ const ROUTE = '/image-preview'
 const MAX_IMAGES = 24
 /** Refuse a single file above this size; a preview is not a transfer. */
 const MAX_BYTES = 64 * 1024 * 1024
-/** How many leading bytes the container sniff reads. */
-const SNIFF_BYTES = 16
+/** How many leading bytes the container sniff reads (an AVIF brand scan needs the ftyp box, not only its magic). */
+const SNIFF_BYTES = 32
 
 /** The containers this preview accepts, keyed by extension, value is what the bytes must say. */
 const MEDIA_TYPES = {
@@ -69,7 +70,23 @@ function sniff(bytes) {
   if (bytes.length >= 12 && bytes[0] === 82 && bytes[1] === 73 && bytes[2] === 70 && bytes[3] === 70
     && bytes[8] === 87 && bytes[9] === 69 && bytes[10] === 66 && bytes[11] === 80) return 'image/webp'
   if (bytes.length >= 2 && bytes[0] === 66 && bytes[1] === 77) return 'image/bmp'
-  if (bytes.length >= 12 && bytes[4] === 102 && bytes[5] === 116 && bytes[6] === 121 && bytes[7] === 112) return 'image/avif'
+  // ISO-BMFF: HEIC, MP4 and AVIF all start with a `ftyp` box, so the magic alone
+  // cannot tell them apart — the brand can. Accept only an AVIF major or
+  // compatible brand, or a HEIC renamed to .avif would pass this check and then
+  // fail to decode in the page.
+  if (bytes.length >= 12 && bytes[4] === 102 && bytes[5] === 116 && bytes[6] === 121 && bytes[7] === 112) {
+    const brand = (at) => {
+      if (at + 4 > bytes.length) return ''
+      return String.fromCharCode(bytes[at], bytes[at + 1], bytes[at + 2], bytes[at + 3])
+    }
+    if (brand(8) === 'avif' || brand(8) === 'avis') return 'image/avif'
+    // Skip the 4-byte minor version that follows the major brand.
+    for (let at = 16; at + 4 <= bytes.length; at += 4) {
+      const compatible = brand(at)
+      if (compatible === 'avif' || compatible === 'avis') return 'image/avif'
+    }
+    return null
+  }
   return null
 }
 
@@ -139,7 +156,14 @@ function repairCandidates(target) {
 function inspect(raw, cwd) {
   const asked = String(raw ?? '').trim()
   if (asked === '') return { ok: false, path: '', reason: '路径是空的' }
-  const target = path.isAbsolute(asked) ? path.normalize(asked) : path.resolve(cwd ?? process.cwd(), asked)
+  // The image route has no Session, so it has no working directory to resolve
+  // against: a relative path there would be read against whatever directory the
+  // host process happens to have. Refuse it by name instead of letting the tool
+  // succeed and the picture fail with a misleading "文件不存在".
+  if (cwd === undefined && !path.isAbsolute(asked)) {
+    return { ok: false, path: asked, reason: '只接受绝对路径（C:\\… 或 C:/…）' }
+  }
+  const target = path.isAbsolute(asked) ? path.normalize(asked) : path.resolve(cwd, asked)
   const extension = path.extname(target).slice(1).toLowerCase()
   const declared = MEDIA_TYPES[extension]
   if (declared === undefined) {
@@ -179,14 +203,18 @@ function inspect(raw, cwd) {
 
 /**
  * The newest images in one directory.
+ *
+ * Every candidate needs its own `stat`, so this is asynchronous on purpose: a
+ * folder with a few thousand scans would otherwise block the host's event loop
+ * (and with it every session stream) for as long as the listing takes.
  * @param {string} dir - an absolute directory.
  * @param {number} limit - how many to keep.
- * @returns {string[]} absolute paths, newest first.
+ * @returns {Promise<string[]>} absolute paths, newest first.
  */
-function newestIn(dir, limit) {
+async function newestIn(dir, limit) {
   let names = []
   try {
-    names = readdirSync(dir)
+    names = await readdir(dir)
   } catch {
     return []
   }
@@ -196,7 +224,7 @@ function newestIn(dir, limit) {
     if (MEDIA_TYPES[extension] === undefined) continue
     const target = path.join(dir, entry)
     try {
-      const info = statSync(target)
+      const info = await stat(target)
       if (info.isFile() === true) found.push({ target, mtime: info.mtimeMs })
     } catch {
       /* it went away mid-listing */
@@ -276,6 +304,15 @@ function createTool(ctx) {
     },
     output: {
       schema: RESULT_SCHEMA,
+      // The card has to paint the pictures the call *produced*, not the paths it
+      // asked for: `dir` expands to files the arguments never mention. The
+      // official result metadata is the channel for that (the `read` and
+      // `read_image` cards read their own paths from it), and it survives a
+      // reload because it is stored with the settled call.
+      presentationMeta: (_args, value) => ({
+        images: Array.isArray(value?.images) ? value.images : [],
+        skipped: Array.isArray(value?.skipped) ? value.skipped.slice(0, 8) : [],
+      }),
       render: (_args, value) => {
         if (value.error) return text('error: ' + value.error)
         if (value.images.length === 0) {
@@ -299,19 +336,39 @@ function createTool(ctx) {
     async execute(args, exec) {
       const asked = Array.isArray(args?.paths) ? args.paths.slice(0) : []
       if (typeof args?.path === 'string' && args.path.trim() !== '') asked.push(args.path)
-      const limit = Math.max(1, Math.min(MAX_IMAGES, Number(args?.limit) || 12))
-      if (typeof args?.dir === 'string' && args.dir.trim() !== '') {
-        const dir = path.isAbsolute(args.dir) ? path.normalize(args.dir) : path.resolve(args.dir)
-        for (const found of newestIn(dir, limit)) asked.push(found)
-      }
-      if (asked.length === 0) return { images: [], skipped: [], caption: '', error: '需要 paths / path / dir 之一' }
       const cwd = await sessionCwd(exec)
+      const limit = Math.max(1, Math.min(MAX_IMAGES, Number(args?.limit) || 12))
+      const skippedSeed = []
+      if (typeof args?.dir === 'string' && args.dir.trim() !== '') {
+        // The directory is resolved the same way a path is: against the Session
+        // working directory, and refused when there is none to resolve against.
+        const dir = path.isAbsolute(args.dir) ? path.normalize(args.dir) : cwd === undefined ? '' : path.resolve(cwd, args.dir)
+        if (dir === '') skippedSeed.push({ path: args.dir, reason: '只接受绝对路径（C:\\… 或 C:/…）' })
+        else for (const found of await newestIn(dir, limit)) asked.push(found)
+      }
+      if (asked.length === 0 && skippedSeed.length === 0) {
+        return { images: [], skipped: [], caption: '', error: '需要 paths / path / dir 之一' }
+      }
+      // One picture asked for twice must cost one read and paint one thumbnail.
+      const wanted = []
+      const seen = new Set()
+      for (const raw of asked) {
+        const key = String(raw ?? '').trim()
+        const finger = process.platform === 'win32' ? key.toLowerCase() : key
+        if (finger !== '' && seen.has(finger)) continue
+        if (finger !== '') seen.add(finger)
+        wanted.push(raw)
+      }
       const images = []
-      const skipped = []
-      for (const raw of asked.slice(0, MAX_IMAGES)) {
+      const skipped = skippedSeed.slice(0)
+      for (const raw of wanted.slice(0, MAX_IMAGES)) {
         const result = inspect(raw, cwd)
         if (result.ok === true) images.push({ path: result.path, mediaType: result.mediaType, bytes: result.bytes })
         else skipped.push({ path: result.path, reason: result.reason })
+      }
+      // Say which ones were dropped, rather than answering "shown 24" and hiding the rest.
+      for (const raw of wanted.slice(MAX_IMAGES)) {
+        skipped.push({ path: String(raw ?? '').trim(), reason: `超过单次 ${MAX_IMAGES} 张上限，未处理` })
       }
       return { images, skipped, caption: typeof args?.caption === 'string' ? args.caption.trim().slice(0, 200) : '' }
     },
@@ -392,6 +449,26 @@ function sendJson(res, status, body) {
 function registerImageRoute(ctx) {
   /** The last handful of requests this route saw, for the self-report. */
   const recent = []
+  /**
+   * The last report per mount stage, keyed by stage.
+   *
+   * `recent` rolls over after 20 requests — a conversation showing a dozen
+   * pictures fills it with image reads alone, which used to evict exactly the
+   * three mount reports the post-upgrade self-check looks for. Keeping one entry
+   * per stage makes that check survive any amount of traffic.
+   */
+  const mounts = {}
+
+  /**
+   * Mount stages and their outcome only: names and `ok`, never a path or a
+   * detail. This is the shape an untrusted `diag` may see.
+   * @returns {Record<string, string>} one entry per stage.
+   */
+  const mountStages = () => {
+    const out = {}
+    for (const [stage, value] of Object.entries(mounts)) out[stage] = value.error === '' ? 'ok' : value.error
+    return out
+  }
 
   /** Remember one request so `diag` can report what actually arrived. */
   const remember = (entry) => {
@@ -400,17 +477,53 @@ function registerImageRoute(ctx) {
     return entry
   }
 
-  /** Run the Host/Origin and browser-session fence; true when the request must stop. */
-  const refuse = (req, res) => {
+  /**
+   * Run the Host/Origin and browser-session fence; true when the request must stop.
+   * @param {import('node:http').IncomingMessage} req - the request under test.
+   * @param {import('node:http').ServerResponse} res - the response to answer on refusal.
+   * @param {object} [entry] - the `recent` record to annotate with the real status.
+   * @returns {boolean} true when the request was refused (and already answered).
+   */
+  /**
+   * Ask the composition's trust check about one request, without answering it.
+   * @param {import('node:http').IncomingMessage} req - the request under test.
+   * @returns {401 | 403 | 503 | undefined} the refusal code, or undefined when trusted.
+   */
+  const fence = (req) => {
     const connection = typeof ctx.get === 'function' ? ctx.get('connection') : undefined
-    if (connection === undefined || typeof connection.requestRejection !== 'function') {
-      sendText(res, 503, 'no connection service')
-      return true
-    }
-    const rejection = connection.requestRejection(req)
+    if (connection === undefined || typeof connection.requestRejection !== 'function') return 503
+    return connection.requestRejection(req)
+  }
+
+  /**
+   * Run the Host/Origin and browser-session fence; true when the request must stop.
+   * @param {import('node:http').IncomingMessage} req - the request under test.
+   * @param {import('node:http').ServerResponse} res - the response to answer on refusal.
+   * @param {object} [entry] - the `recent` record to annotate with the real status.
+   * @returns {boolean} true when the request was refused (and already answered).
+   */
+  const refuse = (req, res, entry) => {
+    const rejection = fence(req)
     if (rejection === undefined) return false
-    sendText(res, rejection, rejection === 401 ? 'unauthorized' : 'forbidden')
+    answerRefusal(rejection, res, entry)
     return true
+  }
+
+  /**
+   * Answer a request the fence refused.
+   * @param {401 | 403 | 503} rejection - the code the fence chose.
+   * @param {import('node:http').ServerResponse} res - the response to own.
+   * @param {object} [entry] - the `recent` record to annotate with that code.
+   */
+  const answerRefusal = (rejection, res, entry) => {
+    // Record the code the fence actually chose, so `diag` does not report a 401
+    // for a request the fence refused with 403.
+    if (entry !== undefined) entry.status = rejection
+    if (rejection === 503) {
+      sendText(res, 503, 'no connection service')
+      return
+    }
+    sendText(res, rejection, rejection === 401 ? 'unauthorized' : 'forbidden')
   }
 
   /**
@@ -418,8 +531,9 @@ function registerImageRoute(ctx) {
    *
    * The path travels in the request body, never in a URL: a custom-scheme proxy
    * may re-encode a query or a path segment, and a re-encoded Windows path is
-   * indistinguishable from a missing file. The answer carries the bytes as
-   * base64 so one JSON response is all the page needs.
+   * indistinguishable from a missing file. The answer is the image bytes
+   * themselves for a caller that asks for `application/octet-stream`, and a JSON
+   * envelope carrying base64 for one that does not (an older page, a test, curl).
    */
   const serveRead = (req, res) => {
     const entry = remember({ at: Date.now(), method: req.method, pathname: ROUTE + '/read', hasQuery: false })
@@ -429,10 +543,7 @@ function registerImageRoute(ctx) {
       res.end('POST only')
       return
     }
-    if (refuse(req, res) === true) {
-      entry.status = 401
-      return
-    }
+    if (refuse(req, res, entry) === true) return
     const chunks = []
     let size = 0
     let tooBig = false
@@ -468,6 +579,17 @@ function registerImageRoute(ctx) {
         return
       }
       try {
+        // The page asks for the bytes themselves (`accept: application/octet-stream`)
+        // so nothing has to inflate them into base64 first: that costs a third more
+        // memory on both sides and puts a multi-megabyte string in the DOM. The JSON
+        // answer stays for an older page and for one that cannot stream.
+        const wantsBinary = typeof req.headers?.accept === 'string' && req.headers.accept.includes('application/octet-stream')
+        if (wantsBinary === true) {
+          serveBinary(res, result)
+          entry.status = 200
+          entry.binary = true
+          return
+        }
         const bytes = readFileSync(result.path)
         entry.status = 200
         sendJson(res, 200, {
@@ -488,6 +610,38 @@ function registerImageRoute(ctx) {
   }
 
   /**
+   * Stream one validated image straight to the page.
+   *
+   * Streaming keeps the host's heap flat however large the picture is, and the
+   * page can hand the response body to `Blob` instead of parsing base64. No
+   * `content-length` is declared: the file may change size between the `stat`
+   * that validated it and the read, and a wrong length would truncate the
+   * picture silently. Nothing is cached, so a rewritten figure is one refresh
+   * away.
+   * @param {import('node:http').ServerResponse} res - the response to own.
+   * @param {{ path: string, mediaType: string }} result - the validated file.
+   */
+  const serveBinary = (res, result) => {
+    const stream = createReadStream(result.path)
+    res.writeHead(200, {
+      'content-type': result.mediaType,
+      'cache-control': 'private, no-store',
+      'x-content-type-options': 'nosniff',
+    })
+    stream.on('error', () => {
+      // A file that vanished mid-read can only be reported by cutting the body:
+      // the head is already out.
+      try {
+        res.destroy()
+      } catch {
+        /* the socket is already gone */
+      }
+    })
+    res.on('close', () => stream.destroy())
+    stream.pipe(res)
+  }
+
+  /**
    * Serve `POST /image-preview/client-report`: the browser half's own mount
    * report, recorded next to the image requests so `diag` can explain a card
    * that never appeared.
@@ -500,6 +654,7 @@ function registerImageRoute(ctx) {
       res.end()
       return
     }
+    if (refuse(req, res, entry) === true) return
     const chunks = []
     let size = 0
     req.on('data', (chunk) => {
@@ -519,6 +674,8 @@ function registerImageRoute(ctx) {
         entry.error = 'report body is not JSON'
       }
       entry.status = 204
+      // One slot per stage, so a mount report cannot be pushed out by traffic.
+      if (entry.stage !== '') mounts[entry.stage] = { at: entry.at, error: entry.error, detail: entry.detail }
       res.writeHead(204, { 'cache-control': 'no-store' })
       res.end()
     })
@@ -555,6 +712,20 @@ function registerImageRoute(ctx) {
       res.end('GET or HEAD only')
       return
     }
+    // Everything below is either a read of arbitrary files or a write. The fence
+    // runs first. `diag` is the one exception, and only in what it *says*: an
+    // untrusted caller still gets "the plugin is mounted", but never a word about
+    // any file or about which paths other requests asked for.
+    const rejection = fence(req)
+    if (rejection !== undefined) {
+      if (isDiag === true) {
+        res.writeHead(200, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' })
+        res.end(JSON.stringify({ base: ROUTE, platform: process.platform, trusted: false, mounts: mountStages() }))
+        return
+      }
+      answerRefusal(rejection, res, entry)
+      return
+    }
     if (isDiag === true) {
       // Read-only self-report: what this process sees for one path, no bytes.
       const asked = queryOf(url, 'path')
@@ -568,14 +739,12 @@ function registerImageRoute(ctx) {
         bytes: result.ok === true ? result.bytes : 0,
         base: ROUTE,
         platform: process.platform,
+        trusted: true,
+        mounts,
         recent,
       }
       res.writeHead(200, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' })
       res.end(JSON.stringify(report))
-      return
-    }
-    if (refuse(req, res) === true) {
-      entry.status = 401
       return
     }
     const asked = encodedAt !== '' ? decodeSegment(encodedAt) : queryOf(url, 'path')
