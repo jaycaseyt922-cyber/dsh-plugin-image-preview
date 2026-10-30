@@ -15,10 +15,13 @@ name: publish
 on:
   workflow_dispatch:
     inputs:
-      dry_run:
-        description: '只演练（npm publish --dry-run）'
-        type: boolean
-        default: true
+      mode:
+        description: 'dry-run = 只演练（不碰 registry，也不走 OIDC）；publish = 真发'
+        type: choice
+        options:
+          - dry-run
+          - publish
+        default: dry-run
 
 permissions:
   contents: read
@@ -53,18 +56,20 @@ jobs:
       - name: npm publish
         # 同上：`run:` 默认 bash -e，先 set +e 才能把失败原因做成 annotation。
         run: |
+          mode="${{ inputs.mode }}"
+          echo "::notice title=publish-mode::mode=$mode"
           node --version
           npm --version
           if [ -n "${ACTIONS_ID_TOKEN_REQUEST_URL:-}" ]; then
-            echo "oidc: available"
+            echo "::notice title=oidc::available"
           else
-            echo "oidc: MISSING (id-token: write / permissions 没生效)"
+            echo "::notice title=oidc::MISSING (id-token: write / permissions 没生效)"
           fi
           set +e
-          if [ "${{ inputs.dry_run }}" = "true" ]; then
-            npm publish --provenance --access public --dry-run 2>&1 | tee publish.log
-          else
+          if [ "$mode" = "publish" ]; then
             npm publish --provenance --access public 2>&1 | tee publish.log
+          else
+            npm publish --provenance --access public --dry-run 2>&1 | tee publish.log
           fi
           status=${PIPESTATUS[0]}
           set -e
