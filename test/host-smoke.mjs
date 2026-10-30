@@ -225,7 +225,14 @@ if (results.routePost?.status !== 200 || results.routePost.ok !== true) failures
 if (results.route404?.status !== 404) failures.push('route404')
 if (results.route405 !== 405) failures.push('route405')
 if (results.route401 !== 401) failures.push('route401')
-if (results.repair?.ok !== true || results.repair.target !== true) failures.push('repair')
+// The Markdown-repair path is Windows-only: it rebuilds the `\` separator Markdown
+// eats before punctuation. On POSIX a backslash is an ordinary filename character,
+// so the repaired spelling can never resolve — asserting it there would only test
+// the filesystem. Skip it and say so in the output, rather than weaken the check.
+const repairIsMeaningful = process.platform === 'win32'
+results.repairWindowsOnly = true
+results.repairChecked = repairIsMeaningful
+if (repairIsMeaningful && (results.repair?.ok !== true || results.repair.target !== true)) failures.push('repair')
 if (results.dirCount < 1) failures.push('dirCount')
 if (results.meta?.images?.length !== 1) failures.push('presentationMeta')
 if (results.metaEmpty?.images?.length !== 0) failures.push('presentationMetaEmpty')
