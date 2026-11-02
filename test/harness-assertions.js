@@ -278,16 +278,46 @@
         dialogGone: document.querySelector('.dsh-ipv-dirty') === null,
         viewerAfterDrop: getComputedStyle(document.querySelector('.dsh-ipv-root')).display,
       }
-      press('Enter')
-      await wait(900)
-      out.annotateSend = {
-        pasted,
-        viewer: getComputedStyle(document.querySelector('.dsh-ipv-root')).display,
-        tile: document.querySelector('img[data-test-tile="1"]') !== null,
-      }
     }
     for (const node of document.querySelectorAll('img[data-test-tile="1"]')) node.remove()
     annotateComposer.remove()
+  }
+
+  // 0.6: A/B comparison with a pixel diff.
+  if (firstFigure) {
+    firstFigure.click()
+    await wait(500)
+    const compareButton = [...document.querySelectorAll('.dsh-ipv-tools .dsh-ipv-btn')].find((b) => b.textContent === '对比')
+    out.compare = { button: compareButton !== undefined && compareButton.disabled === false }
+    if (compareButton !== undefined) {
+      compareButton.click()
+      await wait(1800)
+      const comparePanel = document.querySelector('.dsh-ipv-compare')
+      const compareImgs = [...document.querySelectorAll('.dsh-ipv-compare-pane img')]
+      out.compare.panel = comparePanel !== null
+      out.compare.imgs = compareImgs.length
+      out.compare.loaded = compareImgs.length === 2 && compareImgs.every((i) => i.naturalWidth > 0)
+      const diffButton = [...document.querySelectorAll('.dsh-ipv-compare .dsh-ipv-inkbtn')].find((b) => b.textContent === '差异')
+      if (diffButton !== undefined) {
+        diffButton.click()
+        await wait(700)
+        const diffCanvas = document.querySelector('.dsh-ipv-compare-pane canvas')
+        out.compare.diff = diffCanvas === null
+          ? null
+          : { size: [diffCanvas.width, diffCanvas.height], label: diffCanvas.getAttribute('aria-label') }
+      }
+      const swapButton = [...document.querySelectorAll('.dsh-ipv-compare .dsh-ipv-inkbtn')].find((b) => b.textContent === '交换')
+      const beforeSwap = document.querySelector('.dsh-ipv-compare-name').textContent
+      if (swapButton !== undefined) {
+        swapButton.click()
+        await wait(700)
+        out.compare.swapped = document.querySelector('.dsh-ipv-compare-name').textContent !== beforeSwap
+      }
+      document.querySelector('.dsh-ipv-root').dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))
+      await wait(150)
+      out.compare.closedByEsc = document.querySelector('.dsh-ipv-compare') === null
+      out.compare.viewerAfterEsc = getComputedStyle(document.querySelector('.dsh-ipv-root')).display
+    }
   }
 
   window.__result = out

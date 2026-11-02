@@ -134,6 +134,15 @@ window.__ModuleLoader__.load({
         send: '发送',
         save: '保存',
         hintInk: '拖动绘制 · V 选择移动 · Ctrl+Z 撤销 · Enter 发送 · Esc 关闭',
+        compare: '对比',
+        compareTitle: '和同一组里的另一张图对比（D）',
+        compareSide: '并排',
+        compareDiff: '差异',
+        compareSwap: '交换',
+        compareClose: '关闭对比',
+        compareOnlyOne: '这组里只有一张图，没得比',
+        compareHint: '两张都加载好才能算差异',
+        compareLoading: '加载中…',
         saved: '已保存：{path}',
         saveFailed: '保存失败：{reason}',
         dirtyTitle: '有未导出的标注',
@@ -556,6 +565,64 @@ window.__ModuleLoader__.load({
   display: flex;
   gap: 8px;
   justify-content: flex-end;
+}
+.dsh-ipv-compare {
+  position: absolute;
+  inset: 0;
+  z-index: 3;
+  display: flex;
+  flex-direction: column;
+  background: rgba(10, 12, 16, 0.95);
+}
+.dsh-ipv-compare-bar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 12px;
+  font-size: 12px;
+}
+.dsh-ipv-compare-name {
+  max-width: 30%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  opacity: 0.8;
+}
+.dsh-ipv-compare-select {
+  max-width: 34%;
+  padding: 2px 6px;
+  border: 1px solid rgba(255, 255, 255, 0.2);
+  border-radius: 6px;
+  background: rgba(255, 255, 255, 0.08);
+  color: inherit;
+  font: inherit;
+  font-size: 12px;
+}
+.dsh-ipv-compare-body {
+  flex: 1;
+  display: flex;
+  min-height: 0;
+}
+.dsh-ipv-compare-pane {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 0;
+  padding: 8px;
+}
+.dsh-ipv-compare-pane img,
+.dsh-ipv-compare-pane canvas {
+  max-width: 100%;
+  max-height: 100%;
+  object-fit: contain;
+  background: #000;
+}
+.dsh-ipv-compare-hint {
+  margin: auto;
+  font-size: 12px;
+  opacity: 0.7;
 }
 .dsh-ipv-status {
   position: absolute;
@@ -1383,6 +1450,19 @@ window.__ModuleLoader__.load({
       let undoButton = null
       let redoButton = null
       let dirtyDialog = null
+      /** A/B comparison: the overlay, its two panes, and which paths it shows. */
+      let comparing = false
+      let compareEl = null
+      let compareA = -1
+      let compareB = -1
+      let compareMode = 'side'
+      let compareImgA = null
+      let compareImgB = null
+      let compareCanvas = null
+      let compareTitleEl = null
+      let comparePickerEl = null
+      let compareButton = null
+      let compareChanged = 0
 
       /** Clamp the scale to the viewer's bounds. */
       const clamp = (value) => Math.min(MAX_SCALE, Math.max(MIN_SCALE, value))
@@ -1543,6 +1623,7 @@ window.__ModuleLoader__.load({
         // The box was drawn on the previous picture: it means nothing here.
         selection = null
         inkDrag = null
+        closeCompare()
         inkPaint()
         scale = 1
         offsetX = 0
@@ -1627,6 +1708,8 @@ window.__ModuleLoader__.load({
         resetInk()
         setSelecting(false)
         setInking(false)
+        closeCompare()
+        if (compareButton !== null) compareButton.disabled = paths.length < 2
         if (resizeHandler === null) {
           resizeHandler = () => paint()
           window.addEventListener('resize', resizeHandler)
@@ -1674,6 +1757,28 @@ window.__ModuleLoader__.load({
             event.preventDefault()
             event.stopPropagation()
             toggleInking()
+            return
+          }
+          // The comparison overlay is a layer inside the viewer: Escape leaves it
+          // before it can close the viewer, and D flips between side-by-side and diff.
+          if (comparing === true) {
+            if (event.key === 'Escape') {
+              event.preventDefault()
+              event.stopPropagation()
+              closeCompare()
+              return
+            }
+            if (accel === false && (event.key === 'd' || event.key === 'D')) {
+              event.preventDefault()
+              event.stopPropagation()
+              setCompareMode(compareMode === 'diff' ? 'side' : 'diff')
+              return
+            }
+          }
+          if (accel === false && (event.key === 'd' || event.key === 'D') && inking !== true) {
+            event.preventDefault()
+            event.stopPropagation()
+            toggleCompare()
             return
           }
           if (inking === true) {
@@ -1808,6 +1913,7 @@ window.__ModuleLoader__.load({
         }
         root.style.display = 'none'
         dismissDirtyDialog()
+        closeCompare()
         setSelecting(false)
         setInking(false)
         if (resizeHandler !== null) {
@@ -2761,6 +2867,228 @@ window.__ModuleLoader__.load({
         dirtyDialog = null
       }
 
+      // ------------------------------ comparison ------------------------------
+
+      /** Open or close the A/B comparison overlay. */
+      function toggleCompare() {
+        if (comparing === true) closeCompare()
+        else openCompare()
+      }
+
+      /** Build the comparison overlay for this picture set. */
+      function openCompare() {
+        if (paths.length < 2) {
+          announce(TEXT.compareOnlyOne)
+          return
+        }
+        if (compareEl !== null) return
+        comparing = true
+        compareA = index
+        compareB = index + 1 < paths.length ? index + 1 : index - 1
+        compareMode = 'side'
+        compareChanged = 0
+        compareEl = document.createElement('div')
+        compareEl.className = 'dsh-ipv-compare'
+        const bar = document.createElement('div')
+        bar.className = 'dsh-ipv-compare-bar'
+        compareTitleEl = document.createElement('span')
+        compareTitleEl.className = 'dsh-ipv-compare-name'
+        comparePickerEl = document.createElement('select')
+        comparePickerEl.className = 'dsh-ipv-compare-select'
+        comparePickerEl.setAttribute('aria-label', TEXT.compareTitle)
+        comparePickerEl.addEventListener('change', () => {
+          compareB = Number(comparePickerEl.value)
+          loadCompare()
+        })
+        const button = (label, onClick) => {
+          const element = document.createElement('button')
+          element.type = 'button'
+          element.className = 'dsh-ipv-inkbtn'
+          element.textContent = label
+          element.setAttribute('aria-label', label)
+          element.addEventListener('click', (event) => {
+            event.preventDefault()
+            event.stopPropagation()
+            onClick()
+          })
+          return element
+        }
+        bar.append(
+          compareTitleEl,
+          comparePickerEl,
+          button(TEXT.compareSide, () => setCompareMode('side')),
+          button(TEXT.compareDiff, () => setCompareMode('diff')),
+          button(TEXT.compareSwap, swapCompare),
+          button(TEXT.compareClose, closeCompare),
+        )
+        const body = document.createElement('div')
+        body.className = 'dsh-ipv-compare-body'
+        const paneOf = () => {
+          const pane = document.createElement('div')
+          pane.className = 'dsh-ipv-compare-pane'
+          body.append(pane)
+          return pane
+        }
+        const paneA = paneOf()
+        const paneB = paneOf()
+        const paneDiff = paneOf()
+        paneDiff.style.display = 'none'
+        compareImgA = document.createElement('img')
+        compareImgB = document.createElement('img')
+        compareCanvas = document.createElement('canvas')
+        paneA.append(compareImgA)
+        paneB.append(compareImgB)
+        paneDiff.append(compareCanvas)
+        compareEl.append(bar, body)
+        stage.append(compareEl)
+        fillComparePicker()
+        loadCompare()
+      }
+
+      /** Refresh the picker and the A label after a swap or a new picture set. */
+      function fillComparePicker() {
+        if (comparePickerEl === null) return
+        while (comparePickerEl.firstChild !== null) comparePickerEl.removeChild(comparePickerEl.firstChild)
+        for (let at = 0; at < paths.length; at += 1) {
+          if (at === compareA) continue
+          const option = document.createElement('option')
+          option.value = String(at)
+          option.textContent = 'B：' + baseName(paths[at])
+          if (at === compareB) option.selected = true
+          comparePickerEl.append(option)
+        }
+        if (compareTitleEl !== null) compareTitleEl.textContent = 'A：' + baseName(paths[compareA] ?? '')
+      }
+
+      /** Drop the comparison overlay. */
+      function closeCompare() {
+        if (compareEl !== null) compareEl.remove()
+        compareEl = null
+        comparing = false
+        compareImgA = null
+        compareImgB = null
+        compareCanvas = null
+        compareTitleEl = null
+        comparePickerEl = null
+      }
+
+      /** Swap which picture is A and which is B. */
+      function swapCompare() {
+        if (compareEl === null) return
+        const previous = compareA
+        compareA = compareB
+        compareB = previous
+        fillComparePicker()
+        loadCompare()
+      }
+
+      /** Side-by-side or pixel diff. */
+      function setCompareMode(mode) {
+        compareMode = mode
+        if (compareEl === null) return
+        const panes = compareEl.querySelectorAll('.dsh-ipv-compare-pane')
+        if (panes.length < 3) return
+        panes[0].style.display = mode === 'side' ? 'flex' : 'none'
+        panes[1].style.display = mode === 'side' ? 'flex' : 'none'
+        panes[2].style.display = mode === 'diff' ? 'flex' : 'none'
+        if (mode === 'diff') renderCompareDiff()
+      }
+
+      /** Load both sides from the same candidate chain the viewer uses. */
+      async function loadCompare() {
+        if (compareImgA === null || compareImgB === null) return
+        compareChanged = 0
+        compareImgA.alt = baseName(paths[compareA] ?? '')
+        compareImgB.alt = baseName(paths[compareB] ?? '')
+        await loadInto(compareImgA, paths[compareA] ?? '')
+        await loadInto(compareImgB, paths[compareB] ?? '')
+        if (compareMode === 'diff') renderCompareDiff()
+      }
+
+      /** Point one pane's image at a path, trying each candidate URL in turn. */
+      async function loadInto(img, file) {
+        img.removeAttribute('src')
+        if (file === '') return
+        let list = []
+        try {
+          list = (await sourcesFor(file, 0)).list
+        } catch {
+          list = []
+        }
+        if (list.length === 0) {
+          announce(TEXT.failed)
+          return
+        }
+        let cursor = 0
+        img.onerror = () => {
+          if (cursor >= list.length) {
+            announce(TEXT.failed)
+            return
+          }
+          img.src = list[cursor]
+          cursor += 1
+        }
+        img.onload = () => {
+          if (compareMode === 'diff') renderCompareDiff()
+        }
+        img.onerror()
+      }
+
+      /** Red where the two pictures differ by more than the threshold. */
+      function renderCompareDiff() {
+        if (compareCanvas === null || compareImgA === null || compareImgB === null) return
+        if (compareImgA.naturalWidth === 0 || compareImgB.naturalWidth === 0) return
+        const width = Math.min(1400, Math.max(1, compareImgA.naturalWidth))
+        const height = Math.max(1, Math.round((width / compareImgA.naturalWidth) * compareImgA.naturalHeight))
+        const canvasA = document.createElement('canvas')
+        canvasA.width = width
+        canvasA.height = height
+        const canvasB = document.createElement('canvas')
+        canvasB.width = width
+        canvasB.height = height
+        const ctxA = canvasA.getContext('2d')
+        const ctxB = canvasB.getContext('2d')
+        if (ctxA === null || ctxB === null) return
+        ctxA.drawImage(compareImgA, 0, 0, width, height)
+        ctxB.drawImage(compareImgB, 0, 0, width, height)
+        let dataA
+        let dataB
+        try {
+          dataA = ctxA.getImageData(0, 0, width, height)
+          dataB = ctxB.getImageData(0, 0, width, height)
+        } catch {
+          announce(TEXT.failed)
+          return
+        }
+        compareCanvas.width = width
+        compareCanvas.height = height
+        const out = compareCanvas.getContext('2d')
+        if (out === null) return
+        const diff = out.createImageData(width, height)
+        let changed = 0
+        for (let at = 0; at < dataA.data.length; at += 4) {
+          const delta = Math.abs(dataA.data[at] - dataB.data[at])
+            + Math.abs(dataA.data[at + 1] - dataB.data[at + 1])
+            + Math.abs(dataA.data[at + 2] - dataB.data[at + 2])
+          if (delta > 24) {
+            changed += 1
+            diff.data[at] = 255
+            diff.data[at + 1] = 64
+            diff.data[at + 2] = 64
+            diff.data[at + 3] = 255
+          } else {
+            diff.data[at] = 26
+            diff.data[at + 1] = 28
+            diff.data[at + 2] = 32
+            diff.data[at + 3] = 255
+          }
+        }
+        out.putImageData(diff, 0, 0)
+        compareChanged = changed
+        compareCanvas.title = '差异像素 ' + changed + ' 个（阈值 24）'
+        compareCanvas.setAttribute('aria-label', '差异像素 ' + changed + ' 个')
+      }
+
       /** Create the overlay DOM on first use. */
       function ensure() {
         if (root !== null) return
@@ -2844,6 +3172,7 @@ window.__ModuleLoader__.load({
         selectButton.setAttribute('aria-pressed', 'false')
         annotateButton = button(TEXT.annotate, TEXT.annotateTitle, toggleInking)
         annotateButton.setAttribute('aria-pressed', 'false')
+        compareButton = button(TEXT.compare, TEXT.compareTitle, toggleCompare)
         button('关闭', '关闭（Esc）', () => close())
 
         const stageElement = document.createElement('div')

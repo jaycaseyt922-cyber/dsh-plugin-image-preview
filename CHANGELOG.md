@@ -4,6 +4,21 @@ Notable changes to `dsh-plugin-image-preview`. Format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), versions follow
 [SemVer](https://semver.org/) (pre-1.0: a minor bump may change behaviour).
 
+## [0.6.0] - 2026-11-02
+
+### Added
+- A/B comparison in the viewer (`对比`, `D`): two pictures of the same set side by
+  side, a B picker, a swap, and a pixel-diff mode that paints changed pixels red
+  and reports the count (`差异像素 N 个`). The diff works at up to 1400 px on the
+  long edge, so a 4K screenshot stays interactive.
+- Harness covers the comparison: the panel opens, both sides load, the diff label
+  appears, swap flips A/B, and Escape leaves the comparison without closing the
+  viewer.
+
+### Changed
+- The viewer bar gained `对比`; it is disabled when the set holds fewer than two
+  pictures.
+
 ## [0.5.0] - 2026-11-02
 
 The viewer annotates now: draw on the picture, crop it, and send the result. Every
