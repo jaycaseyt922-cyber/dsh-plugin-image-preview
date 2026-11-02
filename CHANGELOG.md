@@ -4,44 +4,32 @@ Notable changes to `dsh-plugin-image-preview`. Format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), versions follow
 [SemVer](https://semver.org/) (pre-1.0: a minor bump may change behaviour).
 
-## [0.7.0] - 2026-11-02
+## [0.4.0] - 未发布（0.3.0 之后的第一个对外版本）
+
+The viewer became a workbench: box a region and hand it to the model, annotate the
+picture, compare two pictures, and pull the conversation's own pictures back up —
+everything in source-image pixels, and every export leaves through the same paste.
+
+Internal milestones (never published, never numbered as releases):
+`v0.4.0-internal.1` region selection, `.2` annotator, `.3` A/B comparison,
+`.4` per-conversation picture index. The published line stays continuous:
+`0.3.0` → `0.4.0`.
 
 ### Added
-- `preview_image({ recent: true })`: list the pictures this conversation has already
-  shown, newest first (with the usual `limit`, max 24), instead of new files. The
-  list is per Agent — one Agent is one conversation — so two conversations never see
-  each other's pictures; a call without an Agent keeps one process-wide list. Only
-  pictures that really resolved are remembered, and an empty conversation answers
-  `这个会话还没有显示过图片` instead of an empty card.
-- Host smoke covers the ordering, the limit, the per-conversation isolation and the
-  no-Agent fallback.
 
-### Changed
-- The guidance now mentions `recent: true` as the way to bring the earlier pictures
-  back for a second look or a before/after comparison.
+**Region selection and hand-off**
+- Viewer: 「选区」 (`S`) — drag a box over the picture, move it, resize it from any
+  corner; `Esc` cancels the box before it closes the viewer, and `←/→` will not page
+  away a drawn selection.
+- 「看图」 hands the cropped PNG and the chosen instruction to the composer with one
+  synthetic paste (the same intake as Ctrl+V) and closes the viewer on success;
+  failure falls back to the clipboard with a one-line explanation.
+- Instruction templates (describe / OCR / compare) kept in one copy table, plus a
+  provenance line (`来源：<path>（原图裁切 x,y,w,h）`) for follow-up questions.
+- `GET /image-preview/capabilities`: which `vision_*` tools the host exposes, used
+  only for the 「看图」 tooltip. Fenced and cached like the other routes.
 
-## [0.6.0] - 2026-11-02
-
-### Added
-- A/B comparison in the viewer (`对比`, `D`): two pictures of the same set side by
-  side, a B picker, a swap, and a pixel-diff mode that paints changed pixels red
-  and reports the count (`差异像素 N 个`). The diff works at up to 1400 px on the
-  long edge, so a 4K screenshot stays interactive.
-- Harness covers the comparison: the panel opens, both sides load, the diff label
-  appears, swap flips A/B, and Escape leaves the comparison without closing the
-  viewer.
-
-### Changed
-- The viewer bar gained `对比`; it is disabled when the set holds fewer than two
-  pictures.
-
-## [0.5.0] - 2026-11-02
-
-The viewer annotates now: draw on the picture, crop it, and send the result. Every
-coordinate is a source-image pixel, so marks and crop land exactly where they were
-drawn at any zoom.
-
-### Added
+**Annotator**
 - 「标注」 (`A`): rectangle, ellipse, arrow, pen and text, plus a crop region, six
   colours and three stroke widths (which also size the text).
 - Undo/redo over `{ marks, crop }` (50 steps), delete the selected mark, clear all;
@@ -54,52 +42,59 @@ drawn at any zoom.
 - A "discard the marks?" question before closing or paging away from unsaved work:
   keep editing / copy then leave / discard (`Esc`). Marks stay drawn after leaving
   the tool bar; only closing or paging asks.
-- Harness covers the annotator end to end (draw, undo/redo, text, crop, send, the
-  question); probe assertions cover annotate → save → send in a real host.
 
-### Changed
-- One canvas serves both modes: the quick selection and the annotator share the same
-  transform and repaint in the picture's own frame.
-- A fresh open always starts with no marks; switching pictures with unsaved marks
-  asks first instead of silently dropping them.
+**Comparison**
+- A/B comparison in the viewer (`对比`, `D`): side-by-side, overlay with a draggable
+  split line, and a pixel diff that paints changed pixels red and reports the count
+  (`差异像素 N 个`), at up to 1400 px on the long edge.
+- In diff mode: 「发送差异」 hands the diff PNG to the composer, 「保存差异」 writes it
+  through the host save route.
 
-## [0.4.0] - 2026-11-02
+**Conversation picture index**
+- `preview_image({ recent: true })`: list the pictures this conversation has already
+  shown, newest first (with the usual `limit`, max 24). The list is per Agent — one
+  Agent is one conversation — so two conversations never see each other's pictures;
+  a call without an Agent keeps one process-wide list. Only pictures that really
+  resolved are remembered, and an empty conversation answers
+  `这个会话还没有显示过图片` instead of an empty card.
 
-A picture is now something you can hand to the model: box a region in the viewer,
-and the crop plus one instruction land in the composer in a single paste.
-
-### Added
-- Viewer: 「选区」 (`S`) — drag a box over the picture, move it, resize it from any
-  corner; `Esc` cancels the box before it closes the viewer, and `←/→` will not page
-  away a drawn selection.
-- 「看图」 hands the cropped PNG and the chosen instruction to the composer with one
-  synthetic paste (the same intake as Ctrl+V) and closes the viewer on success;
-  failure falls back to the clipboard with a one-line explanation.
-- Instruction templates (describe / OCR / compare) kept in one `COPY.zh` table, plus
-  a provenance line (`来源：<path>（原图裁切 x,y,w,h）`) for follow-up questions.
-- `GET /image-preview/capabilities`: which `vision_*` tools the host exposes, used
-  only for the 「看图」 tooltip. Fenced and cached like the other routes.
-- `test/harness-assertions.js`: selection geometry, the aria label, and the whole
-  paste hand-off into a stand-in Lexical editor.
+**Verification**
+- Harness covers the selection geometry, the annotator end to end, the comparison
+  (panel, both sides, overlay drag, diff label, diff send, Escape) and the style,
+  hover and streaming surfaces.
+- Probe assertions cover selection, annotate → save → send, and comparison in a real
+  host; host smoke covers the capability and save routes, `recent` ordering/limits/
+  isolation, and the fences.
 
 ### Changed
 - The viewer's keyboard hook answers only keys inside the overlay (`document` /
   `body` included while it is open), so a paste into the composer cannot be
   cancelled by the viewer's Enter/Esc handling.
-- The selection layer repaints in the same frame as the picture transform, and its
-  canvas is reallocated only when the viewport changes.
+- One canvas serves both the quick selection and the annotator: same transform,
+  same frame as the picture, canvas reallocated only when the viewport changes.
 - `Ctrl+C` copies the selected crop while a box exists, the whole picture otherwise.
-- Host smoke now covers the capability route, including its fence.
+- A fresh open always starts with no marks; switching pictures with unsaved marks
+  asks first instead of silently dropping them.
+- The viewer bar gained `选区`, `标注` and `对比`; `对比` is disabled when the set holds
+  fewer than two pictures.
+- The guidance mentions `recent: true` as the way to bring earlier pictures back.
 
 ### Fixed
-- `test/harness-assertions.js` checked a stale style-tag name and looked for the
-  hover panel before it was created; both made green runs look red.
 - The viewer could be covered by a host float: the browser tool's watch pill
   (`z-index: 2147483000`, fixed bottom-right) sat above the overlay and hid part of
   the action bar. The overlay now uses the maximum z-index, and the harness proves
   it with a stand-in pill and a hit test.
+- `test/harness-assertions.js` checked a stale style-tag name and looked for the
+  hover panel before it was created; both made green runs look red.
+- The harness `wait` helper routed through `requestAnimationFrame`, which never fires
+  in a hidden tab: the whole assertion run hung instead of failing. It is a plain
+  timer now.
+- Probe assertions read a file through PowerShell's argument quoting, which truncates
+  at the first double quote (a 5.9 KB file arrived as 139 bytes). `cdp.mjs` grew
+  `eval-file`, and the README documents it.
 
 ## [0.3.0] - 2026-10-31
+
 
 The release that made the three surfaces behave under real use: streamed answers,
 re-renders, missing files, and the desktop shell's custom scheme.
@@ -162,3 +157,4 @@ changelogged at the time.
 ## [0.1.0] - earlier
 
 First working version: host route, tool, text decoration.
+
