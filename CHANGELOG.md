@@ -4,6 +4,70 @@ Notable changes to `dsh-plugin-image-preview`. Format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), versions follow
 [SemVer](https://semver.org/) (pre-1.0: a minor bump may change behaviour).
 
+## [0.5.0] - 2026-11-02
+
+The viewer annotates now: draw on the picture, crop it, and send the result. Every
+coordinate is a source-image pixel, so marks and crop land exactly where they were
+drawn at any zoom.
+
+### Added
+- 「标注」 (`A`): rectangle, ellipse, arrow, pen and text, plus a crop region, six
+  colours and three stroke widths (which also size the text).
+- Undo/redo over `{ marks, crop }` (50 steps), delete the selected mark, clear all;
+  `Ctrl+Z` / `Ctrl+Shift+Z` / `Delete`.
+- Three exits: `Enter` sends the annotated PNG with the instruction, `Ctrl+C` copies
+  it, `Ctrl+S` asks the host to write it and shows the path it used.
+- `POST /image-preview/save` on the host half: raw PNG bytes (never base64), 32 MB
+  cap, magic-number check, and a host-generated name inside `%TEMP%\image-preview`.
+  The client's own name is ignored, so a path can never be traversed.
+- A "discard the marks?" question before closing or paging away from unsaved work:
+  keep editing / copy then leave / discard (`Esc`). Marks stay drawn after leaving
+  the tool bar; only closing or paging asks.
+- Harness covers the annotator end to end (draw, undo/redo, text, crop, send, the
+  question); probe assertions cover annotate → save → send in a real host.
+
+### Changed
+- One canvas serves both modes: the quick selection and the annotator share the same
+  transform and repaint in the picture's own frame.
+- A fresh open always starts with no marks; switching pictures with unsaved marks
+  asks first instead of silently dropping them.
+
+## [0.4.0] - 2026-11-02
+
+A picture is now something you can hand to the model: box a region in the viewer,
+and the crop plus one instruction land in the composer in a single paste.
+
+### Added
+- Viewer: 「选区」 (`S`) — drag a box over the picture, move it, resize it from any
+  corner; `Esc` cancels the box before it closes the viewer, and `←/→` will not page
+  away a drawn selection.
+- 「看图」 hands the cropped PNG and the chosen instruction to the composer with one
+  synthetic paste (the same intake as Ctrl+V) and closes the viewer on success;
+  failure falls back to the clipboard with a one-line explanation.
+- Instruction templates (describe / OCR / compare) kept in one `COPY.zh` table, plus
+  a provenance line (`来源：<path>（原图裁切 x,y,w,h）`) for follow-up questions.
+- `GET /image-preview/capabilities`: which `vision_*` tools the host exposes, used
+  only for the 「看图」 tooltip. Fenced and cached like the other routes.
+- `test/harness-assertions.js`: selection geometry, the aria label, and the whole
+  paste hand-off into a stand-in Lexical editor.
+
+### Changed
+- The viewer's keyboard hook answers only keys inside the overlay (`document` /
+  `body` included while it is open), so a paste into the composer cannot be
+  cancelled by the viewer's Enter/Esc handling.
+- The selection layer repaints in the same frame as the picture transform, and its
+  canvas is reallocated only when the viewport changes.
+- `Ctrl+C` copies the selected crop while a box exists, the whole picture otherwise.
+- Host smoke now covers the capability route, including its fence.
+
+### Fixed
+- `test/harness-assertions.js` checked a stale style-tag name and looked for the
+  hover panel before it was created; both made green runs look red.
+- The viewer could be covered by a host float: the browser tool's watch pill
+  (`z-index: 2147483000`, fixed bottom-right) sat above the overlay and hid part of
+  the action bar. The overlay now uses the maximum z-index, and the harness proves
+  it with a stand-in pill and a hit test.
+
 ## [0.3.0] - 2026-10-31
 
 The release that made the three surfaces behave under real use: streamed answers,

@@ -58,7 +58,7 @@ try {
   if (jsonAt < 0) throw new Error('npm pack 没有输出 JSON：' + raw.trim().slice(0, 120))
   const packed = JSON.parse(raw.slice(jsonAt))[0]
   const files = packed.files.map((entry) => entry.path)
-  const required = ['index.js', 'client.js', 'cordis.patch.yml', 'README.md', 'CHANGELOG.md', 'LICENSE', 'test/host-smoke.mjs']
+  const required = ['index.js', 'client.js', 'cordis.patch.yml', 'compatibility.json', 'README.md', 'CHANGELOG.md', 'LICENSE', 'test/host-smoke.mjs']
   const missing = required.filter((entry) => !files.includes(entry))
   const shippedTools = files.filter((entry) => entry.startsWith('tools/'))
   if (missing.length > 0) fail('发布包缺少：' + missing.join(', '))

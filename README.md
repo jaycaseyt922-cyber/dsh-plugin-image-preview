@@ -84,12 +84,52 @@ POST /image-preview/read   请求体 {"path":"C:\\…"}   Accept: application/oc
 
 支持 png / jpg / jpeg / webp / gif / bmp / avif，宿主半按文件头嗅探，扩展名与内容不符会拒绝并说明原因。
 
+## 选区与看图（0.4.0）
+
+查看器顶部多了一个「选区」（快捷键 `S`）。框住一块之后，底栏出现三件事：
+
+```
+指令：描述 | 转文字 | 对比        [看图] [复制] [取消]
+```
+
+- **看图**（`Enter`）：把框住的那块裁成 PNG，连同当前指令**粘贴进输入框**，然后关掉查看器。焦点留在输入框里，按一次回车就发出。
+- **复制**（`Ctrl+C`）：同一张裁好的 PNG 进剪贴板。有选区时复制选区，没有选区时仍复制整张图（0.3.0 的行为）。
+- **取消**（`Esc`）：先取消选区，再按一次才关查看器。有选区时 `←/→` 不换图，免得把画好的框丢掉。
+
+指令只描述“要什么”，**不点名工具**：本机的 Vision Router 有自己的入口规则（开了「结构化预识别」时，第一次视觉调用必须是 `vision_bootstrap`），所以模板写的是「看这张图：…」「把文字抄出来」「和上一张对比」。每次发送附一行来源（`来源：<路径>（原图裁切 x,y,w,h）`），方便后续追问原图。
+
+实现上是**一次合成 paste**：`DataTransfer` 里同时放 `File` 和 `text/plain`，宿主 Lexical 的 paste 命令会同时收下文件和文本——和用户按 Ctrl+V 走同一条通路，不碰私有接口。判定成功不只看 `defaultPrevented`（编辑器在 intake 拒收时也会取消事件），还要看草稿区里有没有出现我们命名的附件（宿主的缩略图把文件名写进 `alt`）；没有就退化成“复制到剪贴板 + 提示”。
+
+`GET /image-preview/capabilities` 让前端知道宿主此刻有没有 `vision_*` 工具，只影响「看图」的 tooltip——图进了草稿本身就有价值，探测不到也照发。
+
+已知边界：选区按**源图像素**存储、导出按原图裁剪，不吃缩放；单次导出上限 40 MP（超过会提示先框小一点）；附件最终能不能发出去还取决于宿主的 attachment intake 策略（尺寸/类型/数量）。
+
+## 标注与三出口（0.5.0）
+
+查看器里点「标注」（或按 `A`），底栏换成工具行：
+
+```
+绘   选择 V · 裁剪 C · 矩形 R · 椭圆 E · 箭头 A · 画笔 P · 文字 T
+色   6 色              粗  2 / 4 / 8（同时决定字号 18 / 26 / 40）
+编辑 撤销 Ctrl+Z · 重做 Ctrl+Shift+Z · 删除 Delete · 清空
+出口 发送 Enter · 复制 Ctrl+C · 保存 Ctrl+S · 关闭 Esc
+```
+
+- **坐标一律是源图像素**：画在哪、导出就在哪，0.05× 与 400% 看到的和导出的完全一致。屏幕线宽有 1 设备像素下限（缩小时不会消失），导出仍用原始宽度。
+- **删除**只删选中的那一笔（选择工具点一下选中，蓝色虚线框标出来）；**清空**一次丢掉全部，但可撤销。
+- **裁剪**只决定导出区域：框外压暗，发送/复制/保存都按裁剪区出图，不裁剪就是整张图。
+- **保存**走 host 路由 `POST /image-preview/save`：前端发 PNG 原始字节（不 base64），宿主校验魔数（只收 PNG）、上限 32 MB、文件名由宿主按时间戳重生成（不信任前端给的名字），写进 `%TEMP%\image-preview\`，返回绝对路径并显示在提示条里。
+- **未导出保护**：有标注时关闭查看器或翻页会先问「继续编辑 / 复制后离开 / 放弃（Esc）」，连按两次 `Esc` 才是放弃。离开工具行（按一次 `Esc`）**不丢**标注，标注仍然画在图上。
+- 文字工具用行内编辑框：支持 `Shift+Enter` 换行，输入法组合期间的 Enter/Escape 不会误提交或取消。
+
+已知边界：单张图最多 200 笔标注、画笔抽稀到 500 点；导出上限 40 MP；标注只存在于这一次导出里，不会写回原图。
+
 ## 两半的分工
 
 | 半边 | 文件 | 职责 |
 | --- | --- | --- |
-| Host | `index.js` | `preview_image` 工具（存在性、魔数、大小校验；`dir` 取最新；去重与超上限上报）；`output.presentationMeta` 把出图清单写进结果元数据；一段系统提示公告；五条只读/自检路由 `/image-preview/{read,file,blob,diag,client-report}`（全部先过 Host/Origin 与会话 cookie 闸门；`read` 是 POST + JSON 请求体，`file`/`blob` 直出字节，只回六种位图并按魔数判定，`no-store`） |
-| Client | `client.js` | `tool.call.toolview` 的 `preview_image` 卡（优先读结果元数据，`dir` 调用也出图）；正文路径的缩略图与整块预览（MutationObserver，只追加、不切文本，自己插入的元素带 `data-ip-own`）；悬停预览；全屏查看器（缩放/平移/翻页/复制/刷新）；同一路径的字节按 `(路径, 刷新序号)` 缓存，一屏多处引用只取一次 |
+| Host | `index.js` | `preview_image` 工具（存在性、魔数、大小校验；`dir` 取最新；去重与超上限上报）；`output.presentationMeta` 把出图清单写进结果元数据；一段系统提示公告；七条路由 `/image-preview/{read,file,blob,diag,client-report,capabilities,save}`（全部先过 Host/Origin 与会话 cookie 闸门；`read` 是 POST + JSON 请求体，`file`/`blob` 直出字节，只回六种位图并按魔数判定，`no-store`；`capabilities` 只回工具是否存在；`save` 是唯一的写路由，只收 PNG 原始字节、文件名由宿主重生成） |
+| Client | `client.js` | `tool.call.toolview` 的 `preview_image` 卡（优先读结果元数据，`dir` 调用也出图）；正文路径的缩略图与整块预览（MutationObserver，只追加、不切文本，自己插入的元素带 `data-ip-own`）；悬停预览；全屏查看器（缩放/平移/翻页/复制/刷新/选区与看图）；同一路径的字节按 `(路径, 刷新序号)` 缓存，一屏多处引用只取一次 |
 
 **取图有三层兜底**：先试本插件自己的 `POST /image-preview/read`（路径走 JSON 请求体，避开 `dsh-app://` 代理对查询串的重编码），再试 `GET /image-preview/file`、`GET /image-preview/blob/<base64url>`，最后试宿主官方的 `api/file`；每条都用 `document.baseURI`／页面 URL／origin／`dsh-app://app/` 四种基址和路径的两种斜杠写法；`<img>` 直接取失败时改用 `fetch` 取字节转 blob 再显示。三层都失败才报错，并把 HTTP 状态、实际 URL、`baseURI` 写在屏幕上。
 
@@ -111,7 +151,7 @@ node --check index.js; node --check client.js
 
 ```powershell
 powershell -NoProfile -ExecutionPolicy Bypass -File tools\probe.ps1 -Start -Supervise -ExitAfter 120
-node tools/cdp.mjs eval "$(Get-Content test\probe-assertions.js -Raw)"
+node tools/cdp.mjs eval-file test\probe-assertions.js
 powershell -NoProfile -ExecutionPolicy Bypass -File tools\probe.ps1 -Stop
 ```
 
@@ -141,12 +181,31 @@ powershell -NoProfile -ExecutionPolicy Bypass -File tools\probe.ps1 -Stop
 powershell -NoProfile -ExecutionPolicy Bypass -File tools\probe.ps1 -Start -Supervise -ExitAfter 90 -MaxMinutes 20
 
 # 2. 干活
-node tools\cdp.mjs eval "document.baseURI"     # 在探针页面里求值
+node tools\cdp.mjs eval "document.baseURI"                  # 在探针页面里求值（单行用 eval）
+powershell -NoProfile -ExecutionPolicy Bypass -File tools\probe.ps1 -Arm   # 断言/截图前先还原窗口，见下节
+node tools\cdp.mjs eval-file test\probe-assertions.js       # 文件用 eval-file：PowerShell 会把带双引号的参数传碎
 node tools\cdp.mjs shot C:\path\probe.png      # 截图（屏幕上什么都不会出现）
+powershell -NoProfile -ExecutionPolicy Bypass -File tools\probe.ps1 -Idle  # 跑完收回最小化
 
 # 3. 90 秒没人连 CDP 它自己停；要立即停就 -Stop
 powershell -NoProfile -ExecutionPolicy Bypass -File tools\probe.ps1 -Stop
 ```
+
+### 断言前必须先 `-Arm`
+
+正文缩略图的图片是**懒加载**的（IntersectionObserver：可见才去取）。最小化的探针窗口没有可视区域，于是：
+
+- 正常路径的 chip 永远停在 `src` 为空，`goodPath.chipPixels` 会读成 `[0,0]`；
+- 坏路径根本不会发起请求，`warnings` 会是 `0`、失败文案也不会出现。
+
+这不是回归，是窗口没渲染。实测对比（同一份断言、同一个探针）：
+
+| 状态 | goodPath | badPath |
+| --- | --- | --- |
+| 最小化（`-Idle`） | `[0,0]` / `src` 空 | `warnings=0`，无失败文案 |
+| `-Arm`（还原窗口） | `[1200,680]` / `blob:dsh-app:…` | `warnings=1`，`打不开 HTTP 404 · 文件不存在` |
+
+所以：**跑 `probe-assertions.js` 之前 `-Arm`，跑完 `-Idle`**，否则会得到一堆假红。截图同理（`cdp.mjs shot` 会自己 `-Arm/-Idle`）。
 
 **由 agent 起探针时，必须放进受管的后台任务**（DSH 的 `run_in_background`，或 `cmd /c start` 之外任何能让它活过这次调用的机制）。原因：DSH 会在**发起调用的那个工具调用结束时回收整棵进程树**——探针是那条树里的子进程，会跟着消失。表现是“刚起就 ECONNREFUSED”，不是 `-Stop` 生效了，也不是看门狗误杀。前台跑 `-Supervise` 时它本来就要占住终端，这时的行为是正确的。
 
@@ -234,8 +293,8 @@ git config --get-all credential.helper   # 有没有 store 之类的明文 helpe
 ### 兼容性承诺
 
 - 只承诺 **Windows 盘符路径**（`C:\…` / `C:/…`）；POSIX 路径不在范围内。
-- 宿主版本没有下限声明（`engines` 只管 Node ≥ 20）；契约变化按上表查，不靠猜。
-- 发布包**不带** `tools/`（它会再起一个应用实例），带 `test/`，所以装完能 `npm test`。
+- 实测过的宿主版本写在 `compatibility.json`（`releaseTargets` / `latestTested`，格式照 `dsh-image-viewer`）：当前是 `0.2.1-rc.5` —— 0.5.0 的选区、标注、一次 paste、保存路由都在它上面实跑过。没有下限声明（`engines` 只管 Node ≥ 20）；契约变化按上表查，不靠猜。
+- 发布包**不带** `tools/`（它会再起一个应用实例），带 `test/` 与 `compatibility.json`，所以装完能 `npm test`。
 
 ## 发布与分享
 
@@ -341,6 +400,8 @@ gh repo create dsh-plugin-image-preview --public --source=. --push
 | `/image-preview/blob/<base64url>` | GET | 图片字节 | 要 |
 | `/image-preview/diag` | GET | 存活 + 各面挂载；**带凭证**才回路径细节与 `recent` | 无凭证只回存活 |
 | `/image-preview/client-report` | POST | 客户端挂载上报 | 要 |
+| `/image-preview/capabilities` | GET | 宿主有哪些 `vision_*` 工具（只回布尔，不带路径） | 要 |
+| `/image-preview/save` | POST | 把标注 PNG 写进 `%TEMP%\image-preview\`，回绝对路径（唯一写路由，只收 PNG 原始字节） | 要 |
 
 不开新端口，全部复用宿主已有端口。
 
@@ -371,4 +432,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File tools\probe.ps1 -Status   # 
 - 看的是磁盘上的当前文件：同一路径被覆盖写后，已渲染的图不会自动变，点查看器的「刷新」才重取。
 - 正文改写依赖会话 DOM 的文本节点；宿主把某段正文改成 canvas/自定义组件渲染时，那段里的路径就不会被识别（不影响其它位置）。
 - **只隐藏“整块只有路径”的原文**：路径独占一行、或一行里只有若干路径时会隐藏；夹在句中的路径保留文字，因为隐藏子串必须切开 React 的文本节点，流式写回会出重复文本（风险大于收益）。
-- 文案是中文硬编码，没有接 `ctx.locale`。
+- 文案是中文硬编码，没有接 `ctx.locale`（新增文案已集中到 `client.js` 的 `COPY.zh`，0.6 接 locale 时只换那一处）。
+- 「看图」依赖宿主的编辑器是 Lexical（`[data-lexical-editor="true"]`）；宿主换成别的编辑器时，选区的裁剪/复制仍可用，回填会退化成“复制到剪贴板 + 提示”。
+- 程序化 paste 需要 `DataTransfer` / `ClipboardEvent` / `File` 三个构造函数都在；桌面壳与浏览器都有，裸 WebView 里可能没有。
+- 「保存」写到 `%TEMP%\image-preview\`，**不自动清理**（临时目录归系统回收）；提示条里的路径是真路径，可以复制出去用。文件名由宿主生成，前端给的名字会被忽略——这是故意的，比“信任前端”少一类漏洞。

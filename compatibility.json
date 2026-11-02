@@ -1,0 +1,7 @@
+{
+  "releaseTargets": [
+    "0.2.1-rc.5"
+  ],
+  "latestTested": "0.2.1-rc.5",
+  "portableBaselines": []
+}

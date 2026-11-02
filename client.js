@@ -54,6 +54,98 @@ window.__ModuleLoader__.load({
     /** Zoom bounds for the viewer. */
     const MIN_SCALE = 0.05
     const MAX_SCALE = 16
+    /** How close, in screen pixels, a press must land to grab a selection handle. */
+    const GRAB_PX = 8
+    /** The smallest useful selection, in source pixels: anything thinner is a slip. */
+    const MIN_SELECTION = 8
+    /** One crop may not exceed this many source pixels (40 MP is already ~30 MB as PNG). */
+    const MAX_EXPORT_PIXELS = 40 * 1000 * 1000
+    /** The composer's editor: a Lexical root, host-verified as the only one on the page. */
+    const EDITOR_SELECTOR = '[data-lexical-editor="true"]'
+    /** Sent pictures carry this name prefix, and the "did it land" check looks for it. */
+    const ATTACHMENT_PREFIX = 'image-preview-'
+    /** The instructions offered next to a selection, in bar order. */
+    const TEMPLATES = ['describe', 'ocr', 'diff']
+    /** Draw tools in bar order: move/select, cut the export region, then shapes. */
+    const TOOLS = ['select', 'crop', 'rect', 'ellipse', 'arrow', 'pen', 'text']
+    /** One-key shortcuts for the draw tools. */
+    const TOOL_KEYS = { v: 'select', c: 'crop', r: 'rect', e: 'ellipse', a: 'arrow', p: 'pen', t: 'text' }
+    /** The annotation palette. Red first: a callout is usually drawn in it. */
+    const COLORS = ['#ff2d2d', '#ffb300', '#12b76a', '#2f6fed', '#111111', '#ffffff']
+    /** Stroke widths in source pixels, so they survive any zoom. */
+    const WIDTHS = [2, 4, 8]
+    /** Text size per stroke width, in source pixels. */
+    const TEXT_SIZES = [18, 26, 40]
+    /** How many marks one picture may carry before the layer stops being cheap. */
+    const MAX_MARKS = 200
+    /** A pen stroke keeps at most this many points (decimated while drawing). */
+    const MAX_PEN_POINTS = 500
+    /** Undo depth: each entry is one `{ marks, crop }` snapshot. */
+    const UNDO_LIMIT = 50
+    /**
+     * Every string the viewer adds, in one table.
+     *
+     * The plugin has no settings page yet, and 0.6 wires `ctx.locale` over this
+     * object; until then Chinese is the only shipped language.
+     */
+    const COPY = {
+      zh: {
+        select: '选区',
+        selectTitle: '框选一块（S）',
+        toolbar: '选区操作',
+        template: '指令',
+        templates: { describe: '描述', ocr: '转文字', diff: '对比' },
+        instructions: {
+          describe: '看这张图：图里这块内容是什么？有没有明显的问题？',
+          ocr: '把这张图里的文字抄出来，保留原有换行和标点。',
+          diff: '和上一张图对比，指出有哪些不同（位置 + 变化）。',
+        },
+        source: '来源：{path}（原图裁切 {x},{y},{w},{h}）',
+        look: '看图',
+        copy: '复制',
+        cancel: '取消',
+        hintSelect: '拖动框选一块 · Enter 看图 · Ctrl+C 复制 · Esc 取消选区',
+        hintView: '滚轮缩放 · 拖动平移 · 双击切换适应/1:1 · ←/→ 换图 · S 选区 · Esc 关闭',
+        sent: '已发到输入框',
+        copied: '已复制到剪贴板',
+        fallback: '没找到输入框，已复制到剪贴板：Ctrl+V 即可发送',
+        noCaps: '未检测到 vision-router（图片仍会进入对话）',
+        tooBig: '选区太大（超过 40MP），请先框小一点',
+        failed: '导出失败',
+        pageFirst: '先取消选区再换图',
+        noClipboard: '当前环境不能复制图片',
+        annotate: '标注',
+        annotateTitle: '标注这张图（A）',
+        inkbar: '标注工具',
+        toolNames: { select: '选择', crop: '裁剪', rect: '矩形', ellipse: '椭圆', arrow: '箭头', pen: '画笔', text: '文字' },
+        toolTitles: {
+          select: '选择 / 移动（V）',
+          crop: '裁剪（C）',
+          rect: '矩形（R）',
+          ellipse: '椭圆（E）',
+          arrow: '箭头（A）',
+          pen: '画笔（P）',
+          text: '文字（T）',
+        },
+        undo: '撤销',
+        redo: '重做',
+        remove: '删除',
+        clear: '清空',
+        send: '发送',
+        save: '保存',
+        hintInk: '拖动绘制 · V 选择移动 · Ctrl+Z 撤销 · Enter 发送 · Esc 关闭',
+        saved: '已保存：{path}',
+        saveFailed: '保存失败：{reason}',
+        dirtyTitle: '有未导出的标注',
+        dirtyKeep: '继续编辑',
+        dirtyCopy: '复制后离开',
+        dirtyDrop: '放弃（Esc）',
+        nothingToSend: '先画点东西或框一块',
+        textPlaceholder: '标注文字…',
+      },
+    }
+    /** The table the viewer reads; `COPY.en` lands with the locale hook. */
+    const TEXT = COPY.zh
 
     const CSS = `
 .dsh-ip-chip {
@@ -234,7 +326,10 @@ window.__ModuleLoader__.load({
 .dsh-ipv-root {
   position: fixed;
   inset: 0;
-  z-index: 9000;
+  /* A full-screen viewer has to be above the host's in-page floats: the browser
+     tool's watch pill sets z-index 2147483000 at bottom-right and used to cover
+     the action bar. Nothing in the page can sit above the maximum. */
+  z-index: 2147483647;
   display: flex;
   flex-direction: column;
   padding-top: var(--dsh-frame-overlay-top, 0px);
@@ -328,6 +423,157 @@ window.__ModuleLoader__.load({
   padding: 6px 12px 10px;
   font-size: 11px;
   opacity: 0.5;
+}
+.dsh-ipv-ink {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  pointer-events: none;
+  touch-action: none;
+}
+.dsh-ipv-stage[data-selecting="1"] {
+  cursor: crosshair;
+}
+.dsh-ipv-inkbar {
+  display: none;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 12px 8px;
+  font-size: 12px;
+}
+.dsh-ipv-inklabel {
+  margin-right: 2px;
+  opacity: 0.6;
+}
+.dsh-ipv-tpl,
+.dsh-ipv-inkbtn {
+  height: 26px;
+  padding: 0 10px;
+  border: 1px solid rgba(255, 255, 255, 0.16);
+  border-radius: 6px;
+  background: rgba(255, 255, 255, 0.06);
+  color: inherit;
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+}
+.dsh-ipv-tpl:hover,
+.dsh-ipv-inkbtn:hover {
+  background: rgba(255, 255, 255, 0.14);
+}
+.dsh-ipv-tpl[aria-pressed="true"] {
+  border-color: rgba(255, 255, 255, 0.34);
+  background: rgba(255, 255, 255, 0.2);
+}
+.dsh-ipv-inkbtn-primary {
+  border-color: transparent;
+  background: var(--dsw-alias-brand-primary, #2f6fed);
+  color: #fff;
+  font-weight: 600;
+}
+.dsh-ipv-inkbtn-primary:hover {
+  background: var(--dsw-alias-brand-primary, #2f6fed);
+  filter: brightness(1.08);
+}
+.dsh-ipv-inkspacer {
+  flex: 1;
+}
+.dsh-ipv-tool[aria-pressed="true"],
+.dsh-ipv-width[aria-pressed="true"] {
+  border-color: rgba(255, 255, 255, 0.34);
+  background: rgba(255, 255, 255, 0.2);
+}
+.dsh-ipv-inkbar-annotate .dsh-ipv-inklabel {
+  margin-left: 6px;
+}
+.dsh-ipv-swatch {
+  width: 18px;
+  height: 18px;
+  padding: 0;
+  border: 1px solid rgba(255, 255, 255, 0.45);
+  border-radius: 50%;
+  cursor: pointer;
+}
+.dsh-ipv-swatch[aria-pressed="true"] {
+  outline: 2px solid #fff;
+  outline-offset: 1px;
+}
+.dsh-ipv-width {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  padding: 0;
+}
+.dsh-ipv-width::after {
+  content: "";
+  display: block;
+  width: 14px;
+  height: var(--w, 4px);
+  border-radius: 999px;
+  background: currentColor;
+}
+.dsh-ipv-textedit {
+  position: absolute;
+  z-index: 1;
+  min-width: 40px;
+  padding: 2px 4px;
+  border: 1px dashed rgba(255, 255, 255, 0.7);
+  border-radius: 4px;
+  background: rgba(0, 0, 0, 0.35);
+  font-size: 16px;
+  line-height: 1.2;
+  white-space: pre-wrap;
+  outline: none;
+}
+.dsh-ipv-textedit:empty::before {
+  content: attr(data-placeholder);
+  opacity: 0.55;
+}
+.dsh-ipv-dirty {
+  position: absolute;
+  inset: 0;
+  z-index: 2;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(0, 0, 0, 0.55);
+}
+.dsh-ipv-dirty-card {
+  min-width: 260px;
+  padding: 16px 18px;
+  border-radius: 10px;
+  background: rgba(24, 26, 32, 0.96);
+  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.5);
+}
+.dsh-ipv-dirty-title {
+  margin-bottom: 12px;
+  font-size: 13px;
+}
+.dsh-ipv-dirty-row {
+  display: flex;
+  gap: 8px;
+  justify-content: flex-end;
+}
+.dsh-ipv-status {
+  position: absolute;
+  left: 50%;
+  bottom: 48px;
+  max-width: 70%;
+  padding: 6px 12px;
+  border-radius: 999px;
+  background: rgba(0, 0, 0, 0.72);
+  color: #fff;
+  font-size: 12px;
+  opacity: 0;
+  transition: opacity 120ms ease;
+  pointer-events: none;
+  transform: translateX(-50%);
+}
+.dsh-ipv-status[data-on="1"] {
+  opacity: 1;
 }
 `
 
@@ -776,6 +1022,280 @@ window.__ModuleLoader__.load({
       return out
     }
 
+    // --------------------------- composer bridge ---------------------------
+
+    /**
+     * The composer editor that last had focus.
+     *
+     * A viewer opened from a thumbnail has no spatial relation to the composer,
+     * so "nearest ancestor" finds nothing; remembering the last editor a key press
+     * or click landed in is what makes the second step of `findComposer` work.
+     */
+    let lastEditor = null
+
+    /** Keep the last focused contenteditable, for `findComposer`. */
+    function rememberEditor(event) {
+      const target = event.target
+      if (target instanceof HTMLElement && target.isContentEditable === true) lastEditor = target
+    }
+
+    /**
+     * Find the composer a picture should be sent to.
+     *
+     * Nearest editor in the anchor's ancestors wins (a figure sits in the
+     * conversation whose composer it belongs to), then the editor that last had
+     * focus, then the last visible one in the document. Only visible, connected
+     * editors count: an unmounted route keeps stale DOM around.
+     * @param {Element | null} anchor - where the request came from.
+     * @returns {HTMLElement | null} the editor root, or null when there is none.
+     */
+    function findComposer(anchor) {
+      const usable = (node) => node instanceof HTMLElement && node.isContentEditable === true
+        && node.isConnected === true && node.getClientRects().length > 0
+      for (let node = anchor ?? null; node !== null; node = node.parentElement) {
+        const found = typeof node.querySelector === 'function' ? node.querySelector(EDITOR_SELECTOR) : null
+        if (usable(found)) return found
+      }
+      if (usable(lastEditor)) return lastEditor
+      const all = Array.from(document.querySelectorAll(EDITOR_SELECTOR)).filter((node) => usable(node))
+      return all.length === 0 ? null : all[all.length - 1]
+    }
+
+    /** A file name for one sent picture; the prefix doubles as the landing anchor. */
+    function fileStamp(now) {
+      const at = new Date(now)
+      const pad = (value) => String(value).padStart(2, '0')
+      return ATTACHMENT_PREFIX + at.getFullYear() + pad(at.getMonth() + 1) + pad(at.getDate())
+        + '-' + pad(at.getHours()) + pad(at.getMinutes()) + pad(at.getSeconds()) + '.png'
+    }
+
+    /**
+     * Paint one annotation. Every coordinate is a source-image pixel, so the same
+     * mark renders identically on the layer and in the exported PNG.
+     * @param {CanvasRenderingContext2D} context - the target context.
+     * @param {object} mark - one entry of the mark list.
+     */
+    function drawMark(context, mark) {
+      if (mark === null || mark === undefined) return
+      context.strokeStyle = mark.color
+      context.fillStyle = mark.color
+      context.lineWidth = mark.width
+      context.lineCap = 'round'
+      context.lineJoin = 'round'
+      context.setLineDash(mark.dashed === true ? [mark.width * 4, mark.width * 3] : [])
+      if (mark.type === 'rect') {
+        context.strokeRect(Math.min(mark.x0, mark.x1), Math.min(mark.y0, mark.y1),
+          Math.abs(mark.x1 - mark.x0), Math.abs(mark.y1 - mark.y0))
+        return
+      }
+      if (mark.type === 'ellipse') {
+        context.beginPath()
+        context.ellipse((mark.x0 + mark.x1) / 2, (mark.y0 + mark.y1) / 2,
+          Math.abs(mark.x1 - mark.x0) / 2, Math.abs(mark.y1 - mark.y0) / 2, 0, 0, Math.PI * 2)
+        context.stroke()
+        return
+      }
+      if (mark.type === 'arrow') {
+        const dx = mark.x1 - mark.x0
+        const dy = mark.y1 - mark.y0
+        const length = Math.sqrt(dx * dx + dy * dy)
+        if (length < 1) return
+        const head = Math.min(length / 2, mark.width * 5)
+        const angle = Math.atan2(dy, dx)
+        context.beginPath()
+        context.moveTo(mark.x0, mark.y0)
+        context.lineTo(mark.x1 - Math.cos(angle) * head * 0.6, mark.y1 - Math.sin(angle) * head * 0.6)
+        context.stroke()
+        context.beginPath()
+        context.moveTo(mark.x1, mark.y1)
+        context.lineTo(mark.x1 - Math.cos(angle - 0.42) * head, mark.y1 - Math.sin(angle - 0.42) * head)
+        context.lineTo(mark.x1 - Math.cos(angle + 0.42) * head, mark.y1 - Math.sin(angle + 0.42) * head)
+        context.closePath()
+        context.fill()
+        return
+      }
+      if (mark.type === 'pen') {
+        const points = mark.points ?? []
+        if (points.length < 4) return
+        context.beginPath()
+        context.moveTo(points[0], points[1])
+        for (let at = 2; at + 1 < points.length; at += 2) context.lineTo(points[at], points[at + 1])
+        context.stroke()
+        return
+      }
+      if (mark.type === 'text') {
+        context.font = (mark.size ?? TEXT_SIZES[1]) + 'px system-ui, "Microsoft YaHei", "PingFang SC", sans-serif'
+        context.textBaseline = 'top'
+        context.shadowColor = 'rgba(0, 0, 0, 0.6)'
+        context.shadowBlur = Math.max(2, (mark.size ?? TEXT_SIZES[1]) / 4)
+        context.fillText(mark.text ?? '', mark.x0, mark.y0)
+        context.shadowBlur = 0
+        context.setLineDash([])
+        return
+      }
+      context.setLineDash([])
+    }
+
+    /** Paint the whole mark list, then the stroke still being drawn. */
+    function drawMarks(context, marks, draft) {
+      for (const mark of marks) drawMark(context, mark)
+      if (draft !== null && draft !== undefined) drawMark(context, draft)
+    }
+
+    /**
+     * Dim everything outside the crop and draw its edge.
+     * @param {CanvasRenderingContext2D} context - the annotation layer's context.
+     * @param {{ x: number, y: number, w: number, h: number }} crop - the region, in source pixels.
+     * @param {{ width: number, height: number }} naturalSize - the picture's source size.
+     * @param {number} zoom - current scale, so the edge stays one screen pixel wide.
+     */
+    function paintCrop(context, crop, naturalSize, zoom) {
+      const k = zoom > 0 ? zoom : 1
+      context.save()
+      context.setLineDash([])
+      context.fillStyle = 'rgba(0, 0, 0, 0.55)'
+      context.fillRect(0, 0, naturalSize.width, crop.y)
+      context.fillRect(0, crop.y + crop.h, naturalSize.width, Math.max(0, naturalSize.height - crop.y - crop.h))
+      context.fillRect(0, crop.y, crop.x, crop.h)
+      context.fillRect(crop.x + crop.w, crop.y, Math.max(0, naturalSize.width - crop.x - crop.w), crop.h)
+      context.strokeStyle = '#ffffff'
+      context.lineWidth = 1.5 / k
+      context.setLineDash([7 / k, 5 / k])
+      context.strokeRect(crop.x, crop.y, crop.w, crop.h)
+      context.restore()
+    }
+
+    /**
+     * Cut the annotated region out of the picture as a PNG.
+     *
+     * Coordinates are source pixels, so the same crop lands on the same pixels
+     * whatever the on-screen zoom. A plain canvas (not `OffscreenCanvas`) keeps
+     * this working on every carrier the desktop ships.
+     * @param {HTMLImageElement} picture - the loaded source picture.
+     * @param {{ x: number, y: number, w: number, h: number } | null} crop - the region, or null for all of it.
+     * @param {object[]} [marks] - annotations, in source pixels; empty for the region-only path.
+     * @returns {Promise<Blob>} the PNG bytes.
+     */
+    function exportPng(picture, crop, marks) {
+      if (picture === null || picture.naturalWidth <= 0) return Promise.reject(new Error(TEXT.failed))
+      const full = crop === null || crop === undefined
+      const width = full ? picture.naturalWidth : Math.max(1, Math.round(crop.w))
+      const height = full ? picture.naturalHeight : Math.max(1, Math.round(crop.h))
+      const offsetX = full ? 0 : Math.round(crop.x)
+      const offsetY = full ? 0 : Math.round(crop.y)
+      const canvas = document.createElement('canvas')
+      canvas.width = width
+      canvas.height = height
+      const context = canvas.getContext('2d')
+      if (context === null) return Promise.reject(new Error(TEXT.failed))
+      context.drawImage(picture, offsetX, offsetY, width, height, 0, 0, width, height)
+      context.translate(-offsetX, -offsetY)
+      drawMarks(context, marks ?? [], null)
+      return new Promise((resolve, reject) => {
+        canvas.toBlob((blob) => {
+          if (blob === null) reject(new Error(TEXT.failed))
+          else resolve(blob)
+        }, 'image/png')
+      })
+    }
+
+    /**
+     * Hand a PNG plus one instruction to the composer, the way a user's Ctrl+V does.
+     *
+     * The composer is a Lexical editor: its paste command takes the files and the
+     * plain text out of the very same `clipboardData` (host-verified), so one
+     * synthetic paste both attaches the picture and types the instruction.
+     * @param {HTMLElement} editor - the composer's editor root.
+     * @param {Blob} blob - the PNG.
+     * @param {string} name - the file name the attachment shows (and reports back in `alt`).
+     * @param {string} text - the instruction to type; empty leaves the draft untouched.
+     * @returns {boolean} whether the composer claimed the event.
+     */
+    function pasteImageWithText(editor, blob, name, text) {
+      if (typeof DataTransfer !== 'function' || typeof ClipboardEvent !== 'function' || typeof File !== 'function') {
+        return false
+      }
+      const transfer = new DataTransfer()
+      transfer.items.add(new File([blob], name, { type: 'image/png' }))
+      if (text !== '') transfer.setData('text/plain', text)
+      try {
+        editor.focus({ preventScroll: true })
+      } catch {
+        /* focus is a courtesy: the paste command does not need it */
+      }
+      const event = new ClipboardEvent('paste', { clipboardData: transfer, bubbles: true, cancelable: true })
+      editor.dispatchEvent(event)
+      return event.defaultPrevented === true
+    }
+
+    /**
+     * Whether a picture we just pasted is really in the draft.
+     *
+     * `preventDefault` alone is not proof: the editor cancels the event even when
+     * its attachment intake refuses the file. The host puts the file name in the
+     * thumbnail's `alt`, which is the one stable hook (class names are hashed).
+     * @param {string} name - the file name handed to `pasteImageWithText`.
+     * @param {number} before - how many of our tiles existed before the paste.
+     * @returns {boolean} true when the attachment tile is in the document.
+     */
+    function attachmentLanded(name, before) {
+      if (document.querySelector('img[alt="' + cssEscape(name) + '"]') !== null) return true
+      let count = 0
+      for (const node of document.querySelectorAll('img[alt]')) {
+        if (String(node.alt).startsWith(ATTACHMENT_PREFIX)) count += 1
+      }
+      return count > before
+    }
+
+    /** How many of our own slides are already on the page (a baseline for one paste). */
+    function attachmentCount() {
+      let count = 0
+      for (const node of document.querySelectorAll('img[alt]')) {
+        if (String(node.alt).startsWith(ATTACHMENT_PREFIX)) count += 1
+      }
+      return count
+    }
+
+    /** Write one PNG to the clipboard, reporting the reason when the carrier says no. */
+    async function copyToClipboard(blob) {
+      const clip = navigator.clipboard
+      if (clip === undefined || typeof clip.write !== 'function' || typeof ClipboardItem !== 'function') {
+        throw new Error(TEXT.noClipboard)
+      }
+      await clip.write([new ClipboardItem({ 'image/png': blob })])
+    }
+
+    /** The last capability answer, so ten viewers in one minute ask the host once. */
+    let capabilityCache = { at: 0, value: null }
+
+    /**
+     * Ask the host which vision tools it currently exposes.
+     *
+     * The browser half cannot see the tool registry; this route is the only way
+     * to say whether "看这块" will reach a vision route. A missing or failed
+     * route answers `null` = unknown, which only changes the tooltip.
+     * @returns {Promise<{describe?: boolean, ocr?: boolean, diff?: boolean} | null>} the answer.
+     */
+    async function visionCapabilities() {
+      const now = Date.now()
+      if (capabilityCache.value !== null && now - capabilityCache.at < 5000) return capabilityCache.value
+      try {
+        const url = new URL('image-preview/capabilities', document.baseURI).href
+        const response = await fetch(url, { credentials: 'same-origin' })
+        if (response.ok !== true) {
+          capabilityCache = { at: now, value: null }
+          return null
+        }
+        const report = await response.json()
+        const vision = report !== null && typeof report.vision === 'object' && report.vision !== null ? report.vision : null
+        capabilityCache = { at: now, value: vision }
+        return vision
+      } catch {
+        capabilityCache = { at: now, value: null }
+        return null
+      }
+    }
+
     // ------------------------------ the viewer ------------------------------
 
     /**
@@ -813,6 +1333,56 @@ window.__ModuleLoader__.load({
       let postFailure = ''
       /** The element to give the keyboard back to when the overlay closes. */
       let returnFocus = null
+      /** The selection layer painted above the picture. */
+      let ink = null
+      /** The instruction bar under the stage, and the buttons it owns. */
+      let inkbar = null
+      let selectButton = null
+      let templateButtons = []
+      let lookButton = null
+      /** The one-line hint under the stage, and the toast above it. */
+      let hintLabel = null
+      let statusLabel = null
+      let statusTimer = 0
+      /** The box the reader dragged, in source pixels; null when there is none. */
+      let selection = null
+      /** Whether the viewer is in selection mode (canvas takes pointer events). */
+      let selecting = false
+      /** The instruction the next send carries. */
+      let template = 'describe'
+      /** The drag in flight: `{ mode, anchor?, start?, box? }` in source pixels. */
+      let inkDrag = null
+      /** The window resize listener, installed while the overlay is open. */
+      let resizeHandler = null
+      /** Annotations, in source pixels; `crop` narrows what an export keeps. */
+      let marks = []
+      let crop = null
+      /** The selected mark index, or -1. */
+      let activeMark = -1
+      /** Current draw tool, colour and stroke width. */
+      let tool = 'select'
+      let strokeColor = COLORS[0]
+      let strokeWidth = WIDTHS[1]
+      /** Undo/redo snapshots of `{ marks, crop }`. */
+      let undoStack = []
+      let redoStack = []
+      /** Whether annotation mode is on (the tool bar is up). */
+      let inking = false
+      /** The stroke being drawn, and the hit it was started from. */
+      let draft = null
+      let inkStart = null
+      /** The inline text editor while a text mark is typed. */
+      let textEditor = null
+      let textEditorOrigin = null
+      /** The annotation bar and everything in it. */
+      let inkbarAnnotate = null
+      let annotateButton = null
+      let toolButtons = []
+      let colorButtons = []
+      let widthButtons = []
+      let undoButton = null
+      let redoButton = null
+      let dirtyDialog = null
 
       /** Clamp the scale to the viewer's bounds. */
       const clamp = (value) => Math.min(MAX_SCALE, Math.max(MIN_SCALE, value))
@@ -824,6 +1394,9 @@ window.__ModuleLoader__.load({
           'translate(-50%, -50%) translate(' + offsetX.toFixed(1) + 'px, ' + offsetY.toFixed(1) + 'px) scale(' + scale.toFixed(4) + ')'
         image.dataset.pixel = scale >= 3 ? '1' : '0'
         if (zoomLabel !== null) zoomLabel.textContent = Math.round(scale * 100) + '%'
+        // Same frame as the picture: a selection painted a frame later visibly
+        // slides against the image during a fast pan.
+        inkPaint()
       }
 
       /** Fit the picture inside the stage, centred. */
@@ -967,6 +1540,10 @@ window.__ModuleLoader__.load({
         prevButton.disabled = index <= 0
         nextButton.disabled = index >= paths.length - 1
         natural = { width: 0, height: 0 }
+        // The box was drawn on the previous picture: it means nothing here.
+        selection = null
+        inkDrag = null
+        inkPaint()
         scale = 1
         offsetX = 0
         offsetY = 0
@@ -1046,6 +1623,14 @@ window.__ModuleLoader__.load({
         if (paths.length === 0) return
         bust = 0
         natural = { width: 0, height: 0 }
+        // A fresh open never inherits a box or annotations from the last one.
+        resetInk()
+        setSelecting(false)
+        setInking(false)
+        if (resizeHandler === null) {
+          resizeHandler = () => paint()
+          window.addEventListener('resize', resizeHandler)
+        }
         if (!root.isConnected) document.body.appendChild(root)
         // Remember where the keyboard came from, and never stack two hooks on one
         // overlay (a second open would make every arrow key step twice).
@@ -1056,22 +1641,123 @@ window.__ModuleLoader__.load({
         }
         root.style.display = 'flex'
         keyHandler = (event) => {
-          if ((event.ctrlKey === true || event.metaKey === true) && (event.key === 'c' || event.key === 'C')) {
+          // Only keys that land in the overlay are ours. Once a picture has been
+          // pasted the focus is in the composer, and Enter there must send.
+          // A key with no focused element arrives on `document`/`body`: while the
+          // modal is up those still belong to it, or Escape would trap the reader.
+          const target = event.target
+          const inside = root !== null
+            && (target === document || target === document.body || root.contains(target) === true)
+          if (inside !== true) return
+          const accel = event.ctrlKey === true || event.metaKey === true
+          // Typing a callout: the editor owns every key except Escape.
+          if (textEditor !== null) {
+            if (event.key === 'Escape') {
+              event.preventDefault()
+              event.stopPropagation()
+              cancelTextEditor()
+            }
+            return
+          }
+          // The "throw away marks?" question owns the keyboard while it is up:
+          // Escape means discard, exactly like the button that says so.
+          if (dirtyDialog !== null) {
+            if (event.key === 'Escape') {
+              event.preventDefault()
+              event.stopPropagation()
+              const drop = dirtyDialog.querySelector('[data-drop="1"]')
+              if (drop !== null) drop.click()
+            }
+            return
+          }
+          if (accel === false && (event.key === 'a' || event.key === 'A')) {
             event.preventDefault()
             event.stopPropagation()
-            copyImage().catch(() => {})
+            toggleInking()
+            return
+          }
+          if (inking === true) {
+            const key = event.key.toLowerCase()
+            if (accel === true && key === 'z') {
+              event.preventDefault()
+              event.stopPropagation()
+              if (event.shiftKey === true) redo()
+              else undo()
+              return
+            }
+            if (accel === true && key === 'y') {
+              event.preventDefault()
+              event.stopPropagation()
+              redo()
+              return
+            }
+            if (accel === true && key === 's') {
+              event.preventDefault()
+              event.stopPropagation()
+              saveAnnotated().catch(() => {})
+              return
+            }
+            if (accel === true && key === 'c') {
+              event.preventDefault()
+              event.stopPropagation()
+              copyAnnotated().catch(() => {})
+              return
+            }
+            if (event.key === 'Delete' || event.key === 'Backspace') {
+              event.preventDefault()
+              event.stopPropagation()
+              deleteActive()
+              return
+            }
+            if (event.key === 'Enter') {
+              event.preventDefault()
+              event.stopPropagation()
+              sendAnnotated().catch(() => {})
+              return
+            }
+            if (event.key === 'Escape') {
+              event.preventDefault()
+              event.stopPropagation()
+              setInking(false)
+              return
+            }
+            if (accel === false && TOOL_KEYS[key] !== undefined) {
+              event.preventDefault()
+              event.stopPropagation()
+              setTool(TOOL_KEYS[key])
+              return
+            }
+          }
+          if (accel === true && (event.key === 'c' || event.key === 'C')) {
+            event.preventDefault()
+            event.stopPropagation()
+            if (selecting === true && selection !== null) copySelection().catch(() => {})
+            else copyImage().catch(() => {})
+            return
+          }
+          if (accel === false && (event.key === 's' || event.key === 'S')) {
+            event.preventDefault()
+            event.stopPropagation()
+            toggleSelecting()
             return
           }
           if (event.key === 'Escape') {
             event.preventDefault()
             event.stopPropagation()
-            close()
+            if (selection !== null) setSelecting(false)
+            else close()
+            return
+          }
+          if (event.key === 'Enter' && selecting === true) {
+            event.preventDefault()
+            event.stopPropagation()
+            sendSelection().catch(() => {})
             return
           }
           if (event.key === 'ArrowLeft' && index > 0) {
             event.preventDefault()
             event.stopPropagation()
-            show(index - 1)
+            pageTo(index - 1)
             return
           }
           if (event.key === 'ArrowRight' && index < paths.length - 1) {
@@ -1109,10 +1795,25 @@ window.__ModuleLoader__.load({
         show(at)
       }
 
-      /** Close the overlay, drop the keyboard hook and give the focus back. */
-      function close() {
+      /**
+       * Close the overlay, drop the keyboard hook and give the focus back.
+       * @param {boolean} [restoreFocus] - false when the composer just took the focus and must keep it.
+       * @param {boolean} [force] - true to close even with unexported marks (after the question is answered).
+       */
+      function close(restoreFocus, force) {
         if (root === null) return
+        if (force !== true && isDirty() === true) {
+          guardDirty(() => close(restoreFocus, true))
+          return
+        }
         root.style.display = 'none'
+        dismissDirtyDialog()
+        setSelecting(false)
+        setInking(false)
+        if (resizeHandler !== null) {
+          window.removeEventListener('resize', resizeHandler)
+          resizeHandler = null
+        }
         if (keyHandler !== null) {
           document.removeEventListener('keydown', keyHandler, true)
           keyHandler = null
@@ -1121,6 +1822,12 @@ window.__ModuleLoader__.load({
           image.onerror = null
           image.onload = null
           image.removeAttribute('src')
+        }
+        // A paste just moved the focus to the composer; pulling it back to the
+        // thumbnail would take the caret away from the text that was sent with it.
+        if (restoreFocus === false) {
+          returnFocus = null
+          return
         }
         // The overlay took the focus; a keyboard reader must land back on the
         // thumbnail they opened it from, not at the top of the document.
@@ -1145,6 +1852,913 @@ window.__ModuleLoader__.load({
         offsetY = stageY - centerY - next * qy
         scale = next
         paint()
+      }
+
+      /** Show one line under the stage, replacing the standing hint. */
+      function setHint(text) {
+        if (hintLabel !== null) hintLabel.textContent = text
+      }
+
+      /** Say one short line in the toast; it fades after a moment. */
+      function announce(text) {
+        if (statusLabel === null) return
+        statusLabel.textContent = text
+        statusLabel.dataset.on = text === '' ? '0' : '1'
+        if (statusTimer !== 0) clearTimeout(statusTimer)
+        statusTimer = text === '' ? 0 : setTimeout(() => {
+          statusTimer = 0
+          if (statusLabel !== null) statusLabel.dataset.on = '0'
+        }, 2600)
+      }
+
+      /** Turn region mode on or off; leaving it drops the box. */
+      function setSelecting(next) {
+        selecting = next
+        if (selecting === true && inking === true) setInking(false)
+        if (selecting === false) {
+          selection = null
+          inkDrag = null
+        }
+        if (selectButton !== null) selectButton.setAttribute('aria-pressed', selecting ? 'true' : 'false')
+        if (inkbar !== null) inkbar.style.display = selecting ? 'flex' : 'none'
+        if (stage !== null) stage.dataset.selecting = selecting ? '1' : '0'
+        if (ink !== null) ink.style.pointerEvents = (selecting === true || inking === true) ? 'auto' : 'none'
+        setHint(selecting ? TEXT.hintSelect : TEXT.hintView)
+        inkPaint()
+      }
+
+      /** The bar button / the `S` key: enter selection mode, or leave it. */
+      function toggleSelecting() {
+        setSelecting(selecting === false)
+      }
+
+      /** Pick the instruction the next send carries, and say which one is on. */
+      function setTemplate(id) {
+        if (TEMPLATES.includes(id) !== true) return
+        template = id
+        for (const element of templateButtons) {
+          element.setAttribute('aria-pressed', element.dataset.template === id ? 'true' : 'false')
+        }
+      }
+
+      /** Map one viewport point onto source-image pixels (may fall outside the picture). */
+      function sourceAt(clientX, clientY) {
+        const box = stage.getBoundingClientRect()
+        return {
+          x: (clientX - box.left - box.width / 2 - offsetX) / scale + natural.width / 2,
+          y: (clientY - box.top - box.height / 2 - offsetY) / scale + natural.height / 2,
+        }
+      }
+
+      /** The four selection corners in source pixels, clockwise from top-left. */
+      function selectionCorners(box) {
+        return [
+          { x: box.x, y: box.y },
+          { x: box.x + box.w, y: box.y },
+          { x: box.x + box.w, y: box.y + box.h },
+          { x: box.x, y: box.y + box.h },
+        ]
+      }
+
+      /** Which corner handle one source-space point grabs, or -1. */
+      function handleAt(point) {
+        if (selection === null) return -1
+        const tolerance = GRAB_PX / scale
+        const corners = selectionCorners(selection)
+        for (let at = 0; at < corners.length; at += 1) {
+          if (Math.abs(point.x - corners[at].x) <= tolerance && Math.abs(point.y - corners[at].y) <= tolerance) return at
+        }
+        return -1
+      }
+
+      /** Whether one source-space point sits inside the current selection. */
+      function insideSelection(point) {
+        if (selection === null) return false
+        return point.x >= selection.x && point.x <= selection.x + selection.w
+          && point.y >= selection.y && point.y <= selection.y + selection.h
+      }
+
+      /** The clamped box two source-space corners describe, or null when it is too thin. */
+      function boxOf(one, other) {
+        const left = Math.max(0, Math.min(one.x, other.x))
+        const top = Math.max(0, Math.min(one.y, other.y))
+        const right = Math.min(natural.width, Math.max(one.x, other.x))
+        const bottom = Math.min(natural.height, Math.max(one.y, other.y))
+        if (right - left < MIN_SELECTION || bottom - top < MIN_SELECTION) return null
+        return { x: left, y: top, w: right - left, h: bottom - top }
+      }
+
+      /** Move one selection by a source-space delta, keeping it inside the picture. */
+      function moveBox(box, dx, dy) {
+        return {
+          x: Math.max(0, Math.min(natural.width - box.w, box.x + dx)),
+          y: Math.max(0, Math.min(natural.height - box.h, box.y + dy)),
+          w: box.w,
+          h: box.h,
+        }
+      }
+
+      /** Canvas pointerdown: region mode and annotation mode share one layer. */
+      function inkDown(event) {
+        if (selecting === true) {
+          regionDown(event)
+          return
+        }
+        if (inking === true) beginAnnotate(event)
+      }
+
+      /** Canvas pointermove for whichever mode owns the layer. */
+      function inkMove(event) {
+        if (selecting === true) regionMove(event)
+        else if (inking === true) moveAnnotate(event)
+      }
+
+      /** Canvas pointerup/cancel for whichever mode owns the layer. */
+      function inkUp(event) {
+        if (selecting === true) regionUp(event)
+        else if (inking === true) endAnnotate(event)
+      }
+
+      /** Start a region drag: a corner resizes from the opposite corner, the inside moves, anywhere else draws. */
+      function regionDown(event) {
+        if (selecting !== true) return
+        event.preventDefault()
+        event.stopPropagation()
+        if (image === null || natural.width <= 0) return
+        const point = sourceAt(event.clientX, event.clientY)
+        const handle = handleAt(point)
+        if (handle >= 0 && selection !== null) {
+          inkDrag = { mode: 'resize', anchor: selectionCorners(selection)[(handle + 2) % 4] }
+        } else if (insideSelection(point)) {
+          inkDrag = { mode: 'move', start: point, box: { ...selection } }
+        } else {
+          inkDrag = { mode: 'new', anchor: point }
+        }
+        try {
+          ink.setPointerCapture(event.pointerId)
+        } catch {
+          /* the pointer is already gone */
+        }
+      }
+
+      /** Update the region drag and repaint the layer. */
+      function regionMove(event) {
+        if (inkDrag === null) return
+        event.preventDefault()
+        event.stopPropagation()
+        const point = sourceAt(event.clientX, event.clientY)
+        if (inkDrag.mode === 'move') {
+          selection = moveBox(inkDrag.box, point.x - inkDrag.start.x, point.y - inkDrag.start.y)
+        } else {
+          selection = boxOf(inkDrag.anchor, point)
+        }
+        inkPaint()
+      }
+
+      /** Finish a region drag, dropping a selection too thin to be meant. */
+      function regionUp(event) {
+        if (inkDrag === null) return
+        event.stopPropagation()
+        inkDrag = null
+        try {
+          ink.releasePointerCapture(event.pointerId)
+        } catch {
+          /* the pointer is already gone */
+        }
+        inkPaint()
+      }
+
+      // ------------------------------ annotation ------------------------------
+
+      /** Whether the reader has drawn something that has not left the viewer yet. */
+      function isDirty() {
+        return marks.length > 0 || crop !== null
+      }
+
+      /** One undoable state: the mark list and the crop, deep enough to be safe. */
+      function snapshot() {
+        return {
+          marks: marks.map((mark) => ({ ...mark, points: mark.points === undefined ? undefined : [...mark.points] })),
+          crop: crop === null ? null : { ...crop },
+        }
+      }
+
+      /** Put one snapshot back and repaint. */
+      function restore(state) {
+        marks = state.marks.map((mark) => ({ ...mark, points: mark.points === undefined ? undefined : [...mark.points] }))
+        crop = state.crop === null ? null : { ...state.crop }
+        if (activeMark >= marks.length) activeMark = marks.length - 1
+        inkPaint()
+      }
+
+      /** Remember the state before one change; a new change drops the redo branch. */
+      function pushUndo(state) {
+        undoStack.push(state ?? snapshot())
+        if (undoStack.length > UNDO_LIMIT) undoStack.shift()
+        redoStack = []
+        syncEditButtons()
+      }
+
+      /** Step back one change. */
+      function undo() {
+        if (undoStack.length === 0) return
+        redoStack.push(snapshot())
+        restore(undoStack.pop())
+        syncEditButtons()
+      }
+
+      /** Step forward one undone change. */
+      function redo() {
+        if (redoStack.length === 0) return
+        undoStack.push(snapshot())
+        restore(redoStack.pop())
+        syncEditButtons()
+      }
+
+      /** Grey out undo/redo when there is nothing to do. */
+      function syncEditButtons() {
+        if (undoButton !== null) undoButton.disabled = undoStack.length === 0
+        if (redoButton !== null) redoButton.disabled = redoStack.length === 0
+      }
+
+      /** Delete the selected mark. */
+      function deleteActive() {
+        if (activeMark < 0 || activeMark >= marks.length) return
+        pushUndo()
+        marks.splice(activeMark, 1)
+        activeMark = -1
+        inkPaint()
+      }
+
+      /** Drop every mark and the crop, in one undoable step. */
+      function clearMarks() {
+        if (marks.length === 0 && crop === null) return
+        pushUndo()
+        marks = []
+        crop = null
+        activeMark = -1
+        inkPaint()
+      }
+
+      /** Pick the tool; `select` moves things, `crop` draws the export region. */
+      function setTool(id) {
+        if (TOOLS.includes(id) !== true) return
+        tool = id
+        if (id !== 'crop') cancelTextEditor()
+        for (const element of toolButtons) {
+          element.setAttribute('aria-pressed', element.dataset.tool === id ? 'true' : 'false')
+        }
+        if (stage !== null) stage.dataset.tool = id
+        inkPaint()
+      }
+
+      /** Pick the stroke colour. */
+      function setStrokeColor(value) {
+        if (COLORS.includes(value) !== true) return
+        strokeColor = value
+        for (const element of colorButtons) {
+          element.setAttribute('aria-pressed', element.dataset.color === value ? 'true' : 'false')
+        }
+        if (textEditor !== null) textEditor.style.color = value
+      }
+
+      /** Pick the stroke width (which also sets the text size). */
+      function setStrokeWidth(value) {
+        if (WIDTHS.includes(value) !== true) return
+        strokeWidth = value
+        for (const element of widthButtons) {
+          element.setAttribute('aria-pressed', String(element.dataset.width) === String(value) ? 'true' : 'false')
+        }
+      }
+
+      /** The style a new mark takes. */
+      function markStyle() {
+        return { color: strokeColor, width: strokeWidth }
+      }
+
+      /** Axis-aligned bounds of one mark, in source pixels. */
+      function markBounds(mark) {
+        if (mark.type === 'pen') {
+          const points = mark.points ?? []
+          if (points.length < 2) return null
+          let left = points[0]
+          let top = points[1]
+          let right = left
+          let bottom = top
+          for (let at = 2; at + 1 < points.length; at += 2) {
+            left = Math.min(left, points[at])
+            right = Math.max(right, points[at])
+            top = Math.min(top, points[at + 1])
+            bottom = Math.max(bottom, points[at + 1])
+          }
+          return { x0: left, y0: top, x1: right, y1: bottom }
+        }
+        if (mark.type === 'text') {
+          const size = mark.size ?? TEXT_SIZES[1]
+          return { x0: mark.x0, y0: mark.y0, x1: mark.x0 + size * Math.max(1, String(mark.text ?? '').length) * 0.62, y1: mark.y0 + size * 1.3 }
+        }
+        return { x0: Math.min(mark.x0, mark.x1), y0: Math.min(mark.y0, mark.y1), x1: Math.max(mark.x0, mark.x1), y1: Math.max(mark.y0, mark.y1) }
+      }
+
+      /** Distance from one point to a segment, used by the pen/arrow hit test. */
+      function segmentDistance(point, ax, ay, bx, by) {
+        const dx = bx - ax
+        const dy = by - ay
+        const length = dx * dx + dy * dy
+        const t = length === 0 ? 0 : Math.max(0, Math.min(1, ((point.x - ax) * dx + (point.y - ay) * dy) / length))
+        const px = ax + t * dx - point.x
+        const py = ay + t * dy - point.y
+        return Math.sqrt(px * px + py * py)
+      }
+
+      /** Whether one source-space point hits a mark, within `tol` source pixels. */
+      function hitsMark(mark, point, tol) {
+        if (mark.type === 'pen') {
+          const points = mark.points ?? []
+          for (let at = 0; at + 3 < points.length; at += 2) {
+            if (segmentDistance(point, points[at], points[at + 1], points[at + 2], points[at + 3]) <= tol) return true
+          }
+          return false
+        }
+        if (mark.type === 'arrow') return segmentDistance(point, mark.x0, mark.y0, mark.x1, mark.y1) <= tol
+        const box = markBounds(mark)
+        if (box === null) return false
+        return point.x >= box.x0 - tol && point.x <= box.x1 + tol && point.y >= box.y0 - tol && point.y <= box.y1 + tol
+      }
+
+      /** The topmost mark under one point, or -1. */
+      function hitMarkAt(point) {
+        const tol = GRAB_PX / scale
+        for (let at = marks.length - 1; at >= 0; at -= 1) {
+          if (hitsMark(marks[at], point, tol)) return at
+        }
+        return -1
+      }
+
+      /** Start a draw/move gesture in annotation mode. */
+      function beginAnnotate(event) {
+        if (inking !== true || image === null || natural.width <= 0) return
+        event.preventDefault()
+        event.stopPropagation()
+        const point = sourceAt(event.clientX, event.clientY)
+        if (tool === 'text') {
+          openTextEditor(point)
+          return
+        }
+        inkStart = { point, before: snapshot() }
+        if (tool === 'select') {
+          const hit = hitMarkAt(point)
+          if (hit >= 0) {
+            activeMark = hit
+            const mark = marks[hit]
+            inkDrag = {
+              mode: 'mark',
+              index: hit,
+              start: point,
+              x0: mark.x0,
+              y0: mark.y0,
+              x1: mark.x1,
+              y1: mark.y1,
+              points: mark.type === 'pen' ? [...(mark.points ?? [])] : undefined,
+            }
+            inkPaint()
+            return
+          }
+          const handle = handleAt(point)
+          if (handle >= 0 && crop !== null) {
+            inkDrag = { mode: 'crop-resize', anchor: selectionCorners(crop)[(handle + 2) % 4] }
+            return
+          }
+          if (crop !== null && insideSelection(point)) {
+            inkDrag = { mode: 'crop-move', start: point, box: { ...crop } }
+            return
+          }
+          activeMark = -1
+          inkPaint()
+          return
+        }
+        if (tool === 'crop') {
+          inkDrag = { mode: 'crop-new', anchor: point }
+          return
+        }
+        // A shape: rect/ellipse/arrow keep two corners, pen keeps a flat point list.
+        draft = tool === 'pen'
+          ? { type: 'pen', ...markStyle(), points: [point.x, point.y] }
+          : { type: tool, ...markStyle(), x0: point.x, y0: point.y, x1: point.x, y1: point.y }
+        inkDrag = { mode: 'draft' }
+      }
+
+      /** Extend the gesture in flight. */
+      function moveAnnotate(event) {
+        if (inkDrag === null) return
+        event.preventDefault()
+        event.stopPropagation()
+        const point = sourceAt(event.clientX, event.clientY)
+        if (inkDrag.mode === 'draft') {
+          if (draft === null) return
+          if (draft.type === 'pen') {
+            const points = draft.points
+            const lastX = points[points.length - 2]
+            const lastY = points[points.length - 1]
+            if (Math.hypot(point.x - lastX, point.y - lastY) >= 2 && points.length < MAX_PEN_POINTS * 2) {
+              points.push(point.x, point.y)
+            }
+          } else {
+            draft.x1 = point.x
+            draft.y1 = point.y
+          }
+        } else if (inkDrag.mode === 'mark') {
+          const mark = marks[inkDrag.index]
+          if (mark === undefined) return
+          const dx = point.x - inkDrag.start.x
+          const dy = point.y - inkDrag.start.y
+          if (mark.type === 'pen') {
+            const from = inkDrag.points ?? []
+            for (let at = 0; at + 1 < from.length; at += 2) {
+              mark.points[at] = from[at] + dx
+              mark.points[at + 1] = from[at + 1] + dy
+            }
+          } else if (mark.type === 'text') {
+            mark.x0 = inkDrag.x0 + dx
+            mark.y0 = inkDrag.y0 + dy
+          } else {
+            mark.x0 = inkDrag.x0 + dx
+            mark.y0 = inkDrag.y0 + dy
+            mark.x1 = inkDrag.x1 + dx
+            mark.y1 = inkDrag.y1 + dy
+          }
+        } else if (inkDrag.mode === 'crop-new' || inkDrag.mode === 'crop-resize') {
+          crop = boxOf(inkDrag.anchor, point)
+        } else if (inkDrag.mode === 'crop-move') {
+          crop = moveBox(inkDrag.box, point.x - inkDrag.start.x, point.y - inkDrag.start.y)
+        }
+        inkPaint()
+      }
+
+      /** A click without a drag is not a mark: require a visible size. */
+      function markIsMeaningful(mark) {
+        if (mark.type === 'pen') return (mark.points === undefined ? 0 : mark.points.length) >= 4
+        if (mark.type === 'text') return String(mark.text ?? '').trim() !== ''
+        return Math.abs(mark.x1 - mark.x0) >= 2 || Math.abs(mark.y1 - mark.y0) >= 2
+      }
+
+      /** Finish the gesture: commit a shape, keep a real move, or drop a slip. */
+      function endAnnotate(event) {
+        if (inkDrag === null) return
+        event.stopPropagation()
+        const before = inkStart === null ? null : inkStart.before
+        const mode = inkDrag.mode
+        inkDrag = null
+        inkStart = null
+        try {
+          ink.releasePointerCapture(event.pointerId)
+        } catch {
+          /* the pointer is already gone */
+        }
+        if (mode === 'draft') {
+          const done = draft
+          draft = null
+          if (done !== null && markIsMeaningful(done) === true) {
+            pushUndo(before)
+            if (marks.length < MAX_MARKS) marks.push(done)
+            activeMark = marks.length - 1
+          }
+        } else if (mode !== 'crop-new' && mode !== 'crop-resize' && mode !== 'crop-move' && mode !== 'mark') {
+          /* nothing to commit */
+        } else if (before !== null) {
+          pushUndo(before)
+        }
+        inkPaint()
+      }
+
+      /** Paint the crop dim, the marks, the stroke in flight and the selection frame. */
+      function inkPaint() {
+        if (ink === null || image === null || natural.width <= 0) return
+        const context = ink.getContext('2d')
+        if (context === null) return
+        const box = stage.getBoundingClientRect()
+        const dpr = window.devicePixelRatio || 1
+        const width = Math.max(1, Math.round(box.width * dpr))
+        const height = Math.max(1, Math.round(box.height * dpr))
+        // Reallocate only when the viewport changed: assigning width/height every
+        // frame would clear the canvas and churn memory on every pointer move.
+        if (ink.width !== width || ink.height !== height) {
+          ink.width = width
+          ink.height = height
+        }
+        context.setTransform(1, 0, 0, 1, 0, 0)
+        context.clearRect(0, 0, ink.width, ink.height)
+        const hasSelection = selecting === true && selection !== null
+        const hasInk = marks.length > 0 || crop !== null || draft !== null || activeMark >= 0
+        if (hasSelection === false && hasInk === false) {
+          ink.setAttribute('aria-label', '')
+          return
+        }
+        const k = dpr * scale
+        context.setTransform(
+          k,
+          0,
+          0,
+          k,
+          dpr * (box.width / 2 + offsetX - (natural.width / 2) * scale),
+          dpr * (box.height / 2 + offsetY - (natural.height / 2) * scale),
+        )
+        if (hasSelection) drawSelection(context, selection, natural, scale)
+        if (hasInk) {
+          if (crop !== null) paintCrop(context, crop, natural, scale)
+          drawMarks(context, marks, draft)
+          if (activeMark >= 0 && marks[activeMark] !== undefined) drawMarkFrame(context, marks[activeMark], scale)
+        }
+        ink.setAttribute('aria-label', hasSelection
+          ? '选区 ' + Math.round(selection.x) + ',' + Math.round(selection.y)
+            + ' ' + Math.round(selection.w) + '×' + Math.round(selection.h) + '（源图像素）'
+          : '标注 ' + marks.length + ' 个' + (crop === null ? '' : '，已裁剪'))
+      }
+
+      /** Outline the selected mark, so Delete has something to point at. */
+      function drawMarkFrame(context, mark, zoom) {
+        const frame = markBounds(mark)
+        if (frame === null) return
+        const k = zoom > 0 ? zoom : 1
+        context.save()
+        context.strokeStyle = '#5ab0ff'
+        context.lineWidth = 1.5 / k
+        context.setLineDash([5 / k, 4 / k])
+        context.strokeRect(frame.x0 - 4 / k, frame.y0 - 4 / k, frame.x1 - frame.x0 + 8 / k, frame.y1 - frame.y0 + 8 / k)
+        context.restore()
+      }
+
+      /** Paint the dimmed surround, the dashed edge and the four corner handles. */
+      function drawSelection(context, box, naturalSize, zoom) {
+        const k = zoom > 0 ? zoom : 1
+        context.save()
+        context.fillStyle = 'rgba(0, 0, 0, 0.55)'
+        context.fillRect(0, 0, naturalSize.width, box.y)
+        context.fillRect(0, box.y + box.h, naturalSize.width, Math.max(0, naturalSize.height - box.y - box.h))
+        context.fillRect(0, box.y, box.x, box.h)
+        context.fillRect(box.x + box.w, box.y, Math.max(0, naturalSize.width - box.x - box.w), box.h)
+        context.strokeStyle = '#ffffff'
+        context.lineWidth = 1.5 / k
+        context.setLineDash([7 / k, 5 / k])
+        context.strokeRect(box.x, box.y, box.w, box.h)
+        context.setLineDash([])
+        const size = 8 / k
+        for (const corner of selectionCorners(box)) {
+          context.fillStyle = '#ffffff'
+          context.fillRect(corner.x - size / 2, corner.y - size / 2, size, size)
+          context.strokeStyle = 'rgba(0, 0, 0, 0.55)'
+          context.lineWidth = 1 / k
+          context.strokeRect(corner.x - size / 2, corner.y - size / 2, size, size)
+        }
+        context.restore()
+      }
+
+      /** Move to another picture, asking first when a drawn state would be lost. */
+      function pageTo(at) {
+        if (at < 0 || at >= paths.length) return
+        if (selecting === true && selection !== null) {
+          announce(TEXT.pageFirst)
+          return
+        }
+        if (isDirty() === true) {
+          guardDirty(() => {
+            resetInk()
+            show(at)
+          })
+          return
+        }
+        show(at)
+      }
+
+      /** Cut the current selection out as a PNG. */
+      function exportSelection() {
+        if (selection === null) return Promise.reject(new Error(TEXT.failed))
+        if (selection.w * selection.h > MAX_EXPORT_PIXELS) return Promise.reject(new Error(TEXT.tooBig))
+        return exportPng(image, selection)
+      }
+
+      /** The instruction that travels with the next picture. */
+      function instructionText() {
+        const lines = [TEXT.instructions[template] ?? TEXT.instructions.describe]
+        const file = paths[index] ?? ''
+        // The region an export keeps: the annotator's crop, else the quick selection.
+        const box = crop ?? (selecting === true ? selection : null)
+        if (file !== '' && box !== null) {
+          lines.push(TEXT.source
+            .replace('{path}', file)
+            .replace('{x}', String(Math.round(box.x)))
+            .replace('{y}', String(Math.round(box.y)))
+            .replace('{w}', String(Math.round(box.w)))
+            .replace('{h}', String(Math.round(box.h))))
+        }
+        return lines.join('\n')
+      }
+
+      /** Main exit: cut the selection, hand it to the composer, and get out of the way. */
+      async function sendSelection() {
+        if (selection === null) return
+        try {
+          const blob = await exportSelection()
+          const name = fileStamp(Date.now())
+          const before = attachmentCount()
+          const editor = findComposer(root)
+          if (editor === null) {
+            await copyToClipboard(blob)
+            announce(TEXT.fallback)
+            return
+          }
+          const claimed = pasteImageWithText(editor, blob, name, instructionText())
+          // The event being cancelled only says someone handled it; the tile shows
+          // whether the intake actually took the file.
+          await new Promise((resolve) => setTimeout(resolve, 320))
+          if (claimed === true && attachmentLanded(name, before) === true) {
+            announce(TEXT.sent)
+            close(false)
+            return
+          }
+          await copyToClipboard(blob)
+          announce(TEXT.fallback)
+        } catch (error) {
+          announce(String((error instanceof Error ? error.message : error) || TEXT.failed))
+        }
+      }
+
+      /** Second exit: the same bytes to the clipboard. */
+      async function copySelection() {
+        if (selection === null) return
+        try {
+          await copyToClipboard(await exportSelection())
+          announce(TEXT.copied)
+        } catch (error) {
+          announce(String((error instanceof Error ? error.message : error) || TEXT.failed))
+        }
+      }
+
+      // --------------------------- annotation exits ---------------------------
+
+      /** Start or stop annotating; the two region modes are exclusive. */
+      function setInking(next) {
+        inking = next
+        if (inking === true) {
+          setSelecting(false)
+        } else {
+          cancelTextEditor()
+        }
+        if (annotateButton !== null) annotateButton.setAttribute('aria-pressed', inking ? 'true' : 'false')
+        if (inkbarAnnotate !== null) inkbarAnnotate.style.display = inking ? 'flex' : 'none'
+        if (stage !== null) stage.dataset.inking = inking ? '1' : '0'
+        if (ink !== null) ink.style.pointerEvents = (inking === true || selecting === true) ? 'auto' : 'none'
+        if (inking === true && stage !== null) stage.dataset.tool = tool
+        setHint(inking ? TEXT.hintInk : TEXT.hintView)
+        inkPaint()
+      }
+
+      /** The bar button / the `A` key. */
+      function toggleInking() {
+        setInking(inking === false)
+      }
+
+      /** The screen position of one source point, relative to the stage. */
+      function stagePointOf(point) {
+        const box = stage.getBoundingClientRect()
+        return {
+          x: box.width / 2 + offsetX + (point.x - natural.width / 2) * scale,
+          y: box.height / 2 + offsetY + (point.y - natural.height / 2) * scale,
+        }
+      }
+
+      /** Put the text editor on the picture at one source point. */
+      function openTextEditor(point) {
+        cancelTextEditor()
+        if (textEditorOrigin !== null) return
+        const editor = document.createElement('div')
+        editor.className = 'dsh-ipv-textedit'
+        editor.contentEditable = 'true'
+        editor.setAttribute('role', 'textbox')
+        editor.setAttribute('aria-label', TEXT.textPlaceholder)
+        editor.dataset.placeholder = TEXT.textPlaceholder
+        editor.style.color = strokeColor
+        const spot = stagePointOf(point)
+        editor.style.left = spot.x + 'px'
+        editor.style.top = spot.y + 'px'
+        stage.append(editor)
+        textEditor = editor
+        textEditorOrigin = point
+        editor.addEventListener('keydown', (event) => {
+          event.stopPropagation()
+          // An IME owns Enter and Escape while it is composing.
+          if (event.isComposing === true || event.keyCode === 229) return
+          if (event.key === 'Escape') {
+            event.preventDefault()
+            cancelTextEditor()
+            return
+          }
+          if (event.key === 'Enter' && event.shiftKey === false) {
+            event.preventDefault()
+            commitTextEditor()
+          }
+        })
+        editor.addEventListener('blur', () => {
+          if (textEditor === editor) commitTextEditor()
+        })
+        editor.focus()
+      }
+
+      /** Commit the text being typed into a mark. */
+      function commitTextEditor() {
+        const editor = textEditor
+        if (editor === null) return
+        const text = String(editor.textContent ?? '').trim()
+        const at = textEditorOrigin
+        textEditor = null
+        textEditorOrigin = null
+        editor.remove()
+        if (at === null || text === '') {
+          inkPaint()
+          return
+        }
+        const size = TEXT_SIZES[Math.max(0, WIDTHS.indexOf(strokeWidth))] ?? TEXT_SIZES[1]
+        pushUndo()
+        if (marks.length < MAX_MARKS) {
+          marks.push({ type: 'text', color: strokeColor, width: strokeWidth, x0: at.x, y0: at.y, size, text })
+          activeMark = marks.length - 1
+        }
+        inkPaint()
+      }
+
+      /** Throw the half-typed text away. */
+      function cancelTextEditor() {
+        if (textEditor === null) return
+        const editor = textEditor
+        textEditor = null
+        textEditorOrigin = null
+        editor.remove()
+        inkPaint()
+      }
+
+      /** Cut the annotated picture out (crop + marks). */
+      function exportAnnotated() {
+        const area = crop === null ? natural.width * natural.height : crop.w * crop.h
+        if (area > MAX_EXPORT_PIXELS) return Promise.reject(new Error(TEXT.tooBig))
+        return exportPng(image, crop, marks)
+      }
+
+      /** Send the annotated picture with the chosen instruction. */
+      async function sendAnnotated() {
+        if (isDirty() === false) {
+          announce(TEXT.nothingToSend)
+          return
+        }
+        try {
+          const blob = await exportAnnotated()
+          const name = fileStamp(Date.now())
+          const before = attachmentCount()
+          const editor = findComposer(root)
+          if (editor === null) {
+            await copyToClipboard(blob)
+            announce(TEXT.fallback)
+            return
+          }
+          const claimed = pasteImageWithText(editor, blob, name, instructionText())
+          await new Promise((resolve) => setTimeout(resolve, 320))
+          if (claimed === true && attachmentLanded(name, before) === true) {
+            announce(TEXT.sent)
+            resetInk()
+            close(false)
+            return
+          }
+          await copyToClipboard(blob)
+          announce(TEXT.fallback)
+        } catch (error) {
+          announce(String((error instanceof Error ? error.message : error) || TEXT.failed))
+        }
+      }
+
+      /** The annotated picture to the clipboard. */
+      async function copyAnnotated() {
+        if (isDirty() === false) {
+          announce(TEXT.nothingToSend)
+          return
+        }
+        try {
+          await copyToClipboard(await exportAnnotated())
+          announce(TEXT.copied)
+        } catch (error) {
+          announce(String((error instanceof Error ? error.message : error) || TEXT.failed))
+        }
+      }
+
+      /** Ask the host to write the PNG to its temp directory and say where. */
+      async function saveAnnotated() {
+        if (isDirty() === false) {
+          announce(TEXT.nothingToSend)
+          return
+        }
+        try {
+          const blob = await exportAnnotated()
+          const response = await fetch(new URL('image-preview/save', document.baseURI).href, {
+            method: 'POST',
+            credentials: 'same-origin',
+            headers: { 'content-type': 'image/png' },
+            body: blob,
+          })
+          const report = await response.json().catch(() => null)
+          if (response.ok !== true || report === null || typeof report.path !== 'string') {
+            const reason = report !== null && typeof report.error === 'string' ? report.error : 'HTTP ' + response.status
+            throw new Error(reason)
+          }
+          announce(TEXT.saved.replace('{path}', report.path))
+        } catch (error) {
+          announce(TEXT.saveFailed.replace('{reason}', String((error instanceof Error ? error.message : error) || '?')))
+        }
+      }
+
+      /** Drop the drawn state after it left the viewer. */
+      function resetInk() {
+        marks = []
+        crop = null
+        activeMark = -1
+        draft = null
+        inkDrag = null
+        undoStack = []
+        redoStack = []
+        cancelTextEditor()
+        syncEditButtons()
+        inkPaint()
+      }
+
+      /** Run one action, asking first when marks would be lost. */
+      function guardDirty(action) {
+        if (isDirty() === false) {
+          action()
+          return
+        }
+        openDirtyDialog(action)
+      }
+
+      /** The "continue / copy / discard" question before marks are thrown away. */
+      function openDirtyDialog(action) {
+        if (dirtyDialog !== null) return
+        const layer = document.createElement('div')
+        layer.className = 'dsh-ipv-dirty'
+        layer.setAttribute('role', 'dialog')
+        layer.setAttribute('aria-modal', 'true')
+        layer.setAttribute('aria-label', TEXT.dirtyTitle)
+        const card = document.createElement('div')
+        card.className = 'dsh-ipv-dirty-card'
+        const title = document.createElement('div')
+        title.className = 'dsh-ipv-dirty-title'
+        title.textContent = TEXT.dirtyTitle
+        const row = document.createElement('div')
+        row.className = 'dsh-ipv-dirty-row'
+        const closeWith = (then) => {
+          if (dirtyDialog === null) return
+          dirtyDialog.remove()
+          dirtyDialog = null
+          if (typeof then === 'function') then()
+        }
+        const make = (label, onClick, primary) => {
+          const element = document.createElement('button')
+          element.type = 'button'
+          element.className = 'dsh-ipv-inkbtn' + (primary === true ? ' dsh-ipv-inkbtn-primary' : '')
+          element.textContent = label
+          element.setAttribute('aria-label', label)
+          element.addEventListener('click', (event) => {
+            event.preventDefault()
+            event.stopPropagation()
+            onClick()
+          })
+          return element
+        }
+        const keep = make(TEXT.dirtyKeep, () => closeWith())
+        const copy = make(TEXT.dirtyCopy, () => {
+          copyAnnotated().then(() => {
+            marks = []
+            crop = null
+            syncEditButtons()
+            closeWith(action)
+          }).catch(() => {})
+        })
+        const drop = make(TEXT.dirtyDrop, () => {
+          marks = []
+          crop = null
+          syncEditButtons()
+          closeWith(action)
+        })
+        drop.dataset.drop = '1'
+        row.append(keep, copy, drop)
+        card.append(title, row)
+        layer.append(card)
+        ;(root ?? document.body).append(layer)
+        dirtyDialog = layer
+        keep.focus()
+      }
+
+      /** Close the question without acting (Escape). */
+      function dismissDirtyDialog() {
+        if (dirtyDialog === null) return
+        dirtyDialog.remove()
+        dirtyDialog = null
       }
 
       /** Create the overlay DOM on first use. */
@@ -1195,8 +2809,12 @@ window.__ModuleLoader__.load({
           return element
         }
 
-        prevButton = button('‹', '上一张（←）', () => show(index - 1))
-        nextButton = button('›', '下一张（→）', () => show(index + 1))
+        prevButton = button('‹', '上一张（←）', () => {
+          pageTo(index - 1)
+        })
+        nextButton = button('›', '下一张（→）', () => {
+          pageTo(index + 1)
+        })
         button('−', '缩小（-）', () => {
           const box = stage.getBoundingClientRect()
           zoomAt(0.8, box.width / 2, box.height / 2)
@@ -1222,7 +2840,11 @@ window.__ModuleLoader__.load({
           bust = Date.now()
           show(index)
         })
-        button('关闭', '关闭（Esc）', close)
+        selectButton = button(TEXT.select, TEXT.selectTitle, toggleSelecting)
+        selectButton.setAttribute('aria-pressed', 'false')
+        annotateButton = button(TEXT.annotate, TEXT.annotateTitle, toggleInking)
+        annotateButton.setAttribute('aria-pressed', 'false')
+        button('关闭', '关闭（Esc）', () => close())
 
         const stageElement = document.createElement('div')
         stageElement.className = 'dsh-ipv-stage'
@@ -1230,17 +2852,25 @@ window.__ModuleLoader__.load({
         picture.className = 'dsh-ipv-image'
         picture.decoding = 'async'
         picture.alt = ''
+        const layer = document.createElement('canvas')
+        layer.className = 'dsh-ipv-ink'
+        // A canvas is opaque to a screen reader: name the thing it shows.
+        layer.setAttribute('role', 'img')
+        layer.setAttribute('aria-label', '')
         const messageElement = document.createElement('div')
         messageElement.className = 'dsh-ipv-message'
         // Failure explanations and the copy/reload confirmations are announced.
         messageElement.setAttribute('role', 'status')
         messageElement.setAttribute('aria-live', 'polite')
-        stageElement.append(picture, messageElement)
+        stageElement.append(picture, layer, messageElement)
         stage = stageElement
         image = picture
+        ink = layer
         message = messageElement
 
         stageElement.addEventListener('dblclick', (event) => {
+          // While annotating, the double click belongs to the text tool.
+          if (inking === true) return
           event.preventDefault()
           if (scale >= 1.99 || scale <= 1.01) actual()
           else fit()
@@ -1283,12 +2913,165 @@ window.__ModuleLoader__.load({
           { passive: false },
         )
 
-        const hint = document.createElement('div')
-        hint.className = 'dsh-ipv-hint'
-        hint.textContent = '滚轮缩放 · 拖动平移 · 双击切换适应/1:1 · ←/→ 换图 · Esc 关闭'
+        for (const type of ['pointerdown', 'pointermove', 'pointerup', 'pointercancel']) {
+          layer.addEventListener(type, type === 'pointerdown' ? inkDown : type === 'pointermove' ? inkMove : inkUp)
+        }
+        // Selecting is a drag on the layer, never a pan of the stage under it, and
+        // a double click there must not flip fit/1:1 beneath a half-drawn box.
+        layer.addEventListener('dblclick', (event) => event.stopPropagation())
+
+        const hintbar = document.createElement('div')
+        hintbar.className = 'dsh-ipv-hint'
+        hintbar.textContent = TEXT.hintView
+        hintLabel = hintbar
+
+        inkbar = document.createElement('div')
+        inkbar.className = 'dsh-ipv-inkbar'
+        inkbar.setAttribute('role', 'toolbar')
+        inkbar.setAttribute('aria-label', TEXT.toolbar)
+        const templateLabel = document.createElement('span')
+        templateLabel.className = 'dsh-ipv-inklabel'
+        templateLabel.textContent = TEXT.template
+        inkbar.append(templateLabel)
+        templateButtons = TEMPLATES.map((id) => {
+          const element = document.createElement('button')
+          element.type = 'button'
+          element.className = 'dsh-ipv-tpl'
+          element.dataset.template = id
+          element.textContent = TEXT.templates[id]
+          element.title = TEXT.templates[id]
+          element.setAttribute('aria-label', TEXT.templates[id])
+          element.setAttribute('aria-pressed', id === template ? 'true' : 'false')
+          element.addEventListener('click', (event) => {
+            event.preventDefault()
+            event.stopPropagation()
+            setTemplate(id)
+          })
+          inkbar.append(element)
+          return element
+        })
+        const spacer = document.createElement('span')
+        spacer.className = 'dsh-ipv-inkspacer'
+        inkbar.append(spacer)
+        const inkButton = (label, onClick, primary) => {
+          const element = document.createElement('button')
+          element.type = 'button'
+          element.className = 'dsh-ipv-inkbtn' + (primary === true ? ' dsh-ipv-inkbtn-primary' : '')
+          element.textContent = label
+          element.setAttribute('aria-label', label)
+          element.addEventListener('click', (event) => {
+            event.preventDefault()
+            event.stopPropagation()
+            onClick()
+          })
+          return element
+        }
+        lookButton = inkButton(TEXT.look, () => {
+          sendSelection().catch(() => {})
+        }, true)
+        inkbar.append(
+          lookButton,
+          inkButton(TEXT.copy, () => {
+            copySelection().catch(() => {})
+          }),
+          inkButton(TEXT.cancel, () => setSelecting(false)),
+        )
+        inkbar.style.display = 'none'
+
+        inkbarAnnotate = document.createElement('div')
+        inkbarAnnotate.className = 'dsh-ipv-inkbar dsh-ipv-inkbar-annotate'
+        inkbarAnnotate.setAttribute('role', 'toolbar')
+        inkbarAnnotate.setAttribute('aria-label', TEXT.inkbar)
+        const section = (label) => {
+          const element = document.createElement('span')
+          element.className = 'dsh-ipv-inklabel'
+          element.textContent = label
+          inkbarAnnotate.append(element)
+        }
+        const chip = (className, label, title) => {
+          const element = document.createElement('button')
+          element.type = 'button'
+          element.className = className
+          element.textContent = label
+          element.title = title
+          element.setAttribute('aria-label', title)
+          element.addEventListener('click', (event) => {
+            event.preventDefault()
+            event.stopPropagation()
+          })
+          inkbarAnnotate.append(element)
+          return element
+        }
+        section('绘')
+        toolButtons = TOOLS.map((id) => {
+          const element = chip('dsh-ipv-inkbtn dsh-ipv-tool', TEXT.toolNames[id], TEXT.toolTitles[id])
+          element.dataset.tool = id
+          element.setAttribute('aria-pressed', id === tool ? 'true' : 'false')
+          element.addEventListener('click', () => setTool(id))
+          return element
+        })
+        section('色')
+        colorButtons = COLORS.map((value) => {
+          const element = chip('dsh-ipv-swatch', '', value)
+          element.dataset.color = value
+          element.style.background = value
+          element.setAttribute('aria-pressed', value === strokeColor ? 'true' : 'false')
+          element.addEventListener('click', () => setStrokeColor(value))
+          return element
+        })
+        section('粗')
+        widthButtons = WIDTHS.map((value) => {
+          const element = chip('dsh-ipv-width', String(value), String(value) + ' px')
+          element.dataset.width = String(value)
+          element.setAttribute('aria-pressed', String(value) === String(strokeWidth) ? 'true' : 'false')
+          element.style.setProperty('--w', String(value))
+          element.addEventListener('click', () => setStrokeWidth(value))
+          return element
+        })
+        undoButton = chip('dsh-ipv-inkbtn', TEXT.undo, TEXT.undo + '（Ctrl+Z）')
+        undoButton.addEventListener('click', undo)
+        redoButton = chip('dsh-ipv-inkbtn', TEXT.redo, TEXT.redo + '（Ctrl+Shift+Z）')
+        redoButton.addEventListener('click', redo)
+        const removeButton = chip('dsh-ipv-inkbtn', TEXT.remove, TEXT.remove + '（Delete）')
+        removeButton.addEventListener('click', deleteActive)
+        const clearButton = chip('dsh-ipv-inkbtn', TEXT.clear, TEXT.clear)
+        clearButton.addEventListener('click', clearMarks)
+        section(TEXT.template)
+        for (const id of TEMPLATES) {
+          const element = chip('dsh-ipv-tpl', TEXT.templates[id], TEXT.templates[id])
+          element.dataset.template = id
+          element.setAttribute('aria-pressed', id === template ? 'true' : 'false')
+          element.addEventListener('click', () => setTemplate(id))
+          templateButtons.push(element)
+        }
+        const annotateSpacer = document.createElement('span')
+        annotateSpacer.className = 'dsh-ipv-inkspacer'
+        inkbarAnnotate.append(annotateSpacer)
+        const sendButton = chip('dsh-ipv-inkbtn dsh-ipv-inkbtn-primary', TEXT.send, TEXT.send + '（Enter）')
+        sendButton.addEventListener('click', () => {
+          sendAnnotated().catch(() => {})
+        })
+        const copyAnnotatedButton = chip('dsh-ipv-inkbtn', TEXT.copy, TEXT.copy + '（Ctrl+C）')
+        copyAnnotatedButton.addEventListener('click', () => {
+          copyAnnotated().catch(() => {})
+        })
+        const saveButton = chip('dsh-ipv-inkbtn', TEXT.save, TEXT.save + '（Ctrl+S）')
+        saveButton.addEventListener('click', () => {
+          saveAnnotated().catch(() => {})
+        })
+        const closeButton = chip('dsh-ipv-inkbtn', TEXT.cancel, TEXT.cancel + '（Esc）')
+        closeButton.addEventListener('click', () => setInking(false))
+        inkbarAnnotate.style.display = 'none'
+        syncEditButtons()
+
+        statusLabel = document.createElement('div')
+        statusLabel.className = 'dsh-ipv-status'
+        statusLabel.setAttribute('role', 'status')
+        statusLabel.setAttribute('aria-live', 'polite')
+        statusLabel.dataset.on = '0'
 
         bar.append(nameLabel, metaLabel, tools)
-        root.append(bar, stageElement, hint)
+        root.append(bar, stageElement, inkbar, inkbarAnnotate, hintbar, statusLabel)
         root.addEventListener('pointerdown', (event) => {
           if (event.target === root) close()
         })
@@ -1297,7 +3080,7 @@ window.__ModuleLoader__.load({
 
       /** Take the overlay out of the page on unload. */
       function destroy() {
-        close()
+        close(undefined, true)
         if (root !== null) root.remove()
         root = null
       }
@@ -2139,6 +3922,15 @@ window.__ModuleLoader__.load({
         })
       } catch (error) {
         report('effects-failed', error)
+      }
+
+      try {
+        // "Send to the composer" needs to know which editor the reader was last in:
+        // the viewer covers the page, so nothing is focused when it closes.
+        document.addEventListener('focusin', rememberEditor, true)
+        ctx.effect(() => () => document.removeEventListener('focusin', rememberEditor, true))
+      } catch (error) {
+        report('composer-watch-failed', error)
       }
 
       try {

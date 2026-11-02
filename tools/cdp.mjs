@@ -1,14 +1,27 @@
 // 探针的 CDP 驱动：连到探针实例的页面，执行 JS 或截图。
 //
 //   node tools/cdp.mjs eval "document.baseURI"        # 在页面里求值，打印结果
+//   node tools/cdp.mjs eval-file test\probe-assertions.js   # 从文件读 JS 求值（推荐）
 //   node tools/cdp.mjs shot <out.png>                 # 整页截图
 //   node tools/cdp.mjs pages                          # 列出 target
 //
+// `eval-file` 存在的原因：PowerShell 会把带双引号的参数传碎——`eval "$(Get-Content x -Raw)"`
+// 在第一个 `"` 处截断，求值的其实只剩开头那段注释（实测：5.9 KB 的断言文件传成 139 字节，
+// 返回值是 undefined）。写文件、按文件读，绕开 shell 的引号规则。
+//
 // 只依赖 Node 内置的 fetch / WebSocket（Node >= 22），不需要 Playwright。
 import { spawnSync } from 'node:child_process'
+import { readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 
 const port = Number(process.env.PROBE_CDP_PORT ?? 9333)
+/**
+ * How long one CDP call may take.
+ *
+ * The assertion file waits on real timers; a minimized probe window throttles
+ * them, so a slow run is normal and the ceiling is a setting, not a constant.
+ */
+const callTimeout = Number(process.env.PROBE_CDP_TIMEOUT ?? 20000)
 const command = process.argv[2]
 const argument = process.argv[3]
 
@@ -68,8 +81,8 @@ async function send(socket, method, params) {
     socket.addEventListener('message', onMessage)
     setTimeout(() => {
       socket.removeEventListener('message', onMessage)
-      reject(new Error('CDP timeout for ' + method))
-    }, 20000)
+      reject(new Error('CDP timeout for ' + method + ' after ' + callTimeout + ' ms (raise PROBE_CDP_TIMEOUT)'))
+    }, callTimeout)
   })
   socket.send(JSON.stringify({ id, method, params }))
   return reply
@@ -94,9 +107,18 @@ if (command === 'pages') {
 
 const socket = await connect(page)
 
-if (command === 'eval') {
+if (command === 'eval' || command === 'eval-file') {
+  let expression = argument
+  if (command === 'eval-file') {
+    try {
+      expression = readFileSync(argument, 'utf8')
+    } catch (error) {
+      console.error('cannot read ' + argument + ': ' + String(error?.message ?? error))
+      process.exit(4)
+    }
+  }
   const result = await send(socket, 'Runtime.evaluate', {
-    expression: argument,
+    expression,
     awaitPromise: true,
     returnByValue: true,
     userGesture: true,
@@ -126,7 +148,7 @@ if (command === 'eval') {
   console.log('saved ' + (argument ?? 'probe.png'))
   probeWindow('-Idle')
 } else {
-  console.error('usage: cdp.mjs eval "<js>" | shot <out.png> | pages')
+  console.error('usage: cdp.mjs eval "<js>" | eval-file <path> | shot <out.png> | pages')
   process.exit(1)
 }
 
