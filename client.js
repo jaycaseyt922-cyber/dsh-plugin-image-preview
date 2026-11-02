@@ -282,7 +282,10 @@ window.__ModuleLoader__.load({
 .dsh-ipv-root {
   position: fixed;
   inset: 0;
-  z-index: 9000;
+  /* A full-screen viewer has to be above the host's in-page floats: the browser
+     tool's watch pill sets z-index 2147483000 at bottom-right and used to cover
+     the action bar. Nothing in the page can sit above the maximum. */
+  z-index: 2147483647;
   display: flex;
   flex-direction: column;
   padding-top: var(--dsh-frame-overlay-top, 0px);

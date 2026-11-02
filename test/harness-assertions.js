@@ -90,8 +90,24 @@
 
   const firstFigure = document.querySelector('.dsh-ip-figure')
   if (firstFigure) {
+    // A host float like the browser tool's watch pill: fixed at bottom-right at
+    // z-index 2147483000. The viewer must cover it, not the other way round.
+    const pill = document.createElement('div')
+    pill.id = 'fake-watch-pill'
+    pill.style.cssText = 'position:fixed;right:16px;bottom:16px;width:140px;height:34px;z-index:2147483000;background:#d9534f'
+    document.body.append(pill)
+
     firstFigure.click()
     await wait(600)
+    const rootBox = document.querySelector('.dsh-ipv-root')
+    const pillBox = pill.getBoundingClientRect()
+    const hit = document.elementFromPoint(pillBox.left + pillBox.width / 2, pillBox.top + pillBox.height / 2)
+    out.zOrder = {
+      viewerZ: getComputedStyle(rootBox).zIndex,
+      pillCoversViewer: hit === pill,
+      viewerOnTop: hit !== null && hit.closest('.dsh-ipv-root') !== null,
+    }
+    pill.remove()
     const selectButton = [...document.querySelectorAll('.dsh-ipv-btn')].find((b) => b.textContent === '选区')
     out.select = { button: selectButton !== undefined }
     if (selectButton !== undefined) {

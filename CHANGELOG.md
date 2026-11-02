@@ -35,6 +35,10 @@ and the crop plus one instruction land in the composer in a single paste.
 ### Fixed
 - `test/harness-assertions.js` checked a stale style-tag name and looked for the
   hover panel before it was created; both made green runs look red.
+- The viewer could be covered by a host float: the browser tool's watch pill
+  (`z-index: 2147483000`, fixed bottom-right) sat above the overlay and hid part of
+  the action bar. The overlay now uses the maximum z-index, and the harness proves
+  it with a stand-in pill and a hit test.
 
 ## [0.3.0] - 2026-10-31
 
