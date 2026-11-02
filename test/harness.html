@@ -74,6 +74,11 @@
       },
     };
   </script>
+  <script>
+    // The plugin follows <html lang>; `?lang=en` exercises the English copy.
+    const requestedLang = new URLSearchParams(location.search).get('lang');
+    if (requestedLang !== null) document.documentElement.lang = requestedLang;
+  </script>
   <script src="../client.js"></script>
   <script>
     window.__applied = false;

@@ -169,10 +169,134 @@ window.__ModuleLoader__.load({
         prefsReset: '恢复默认',
         prefsDone: '完成',
         prefsNote: '只存本机（localStorage），不写 profile。',
+        viewerLabel: '图片查看器',
+        prevTitle: '上一张（←）',
+        nextTitle: '下一张（→）',
+        zoomOutTitle: '缩小（-）',
+        zoomInTitle: '放大（+）',
+        fit: '适应',
+        fitTitle: '适应窗口（0 / 双击）',
+        actualTitle: '原始像素（1）',
+        copyImage: '复制',
+        copyImageTitle: '把这张图复制到剪贴板（Ctrl+C）',
+        refresh: '刷新',
+        refreshTitle: '重新读取文件（覆盖写过的图也能更新）',
+        close: '关闭',
+        closeTitle: '关闭（Esc）',
+      },
+      en: {
+        select: 'Select',
+        selectTitle: 'Box a region (S)',
+        toolbar: 'Selection actions',
+        template: 'Instruction',
+        templates: { describe: 'Describe', ocr: 'Text', diff: 'Compare' },
+        instructions: {
+          describe: 'Look at this picture: what is in this region, and is anything obviously wrong?',
+          ocr: 'Copy the text in this picture, keeping the original line breaks and punctuation.',
+          diff: 'Compare this with the previous picture and point out what changed (where and how).',
+        },
+        source: 'Source: {path} (crop {x},{y},{w},{h} of the original)',
+        look: 'Look',
+        copy: 'Copy',
+        cancel: 'Cancel',
+        hintSelect: 'Drag to box a region · Enter to look · Ctrl+C to copy · Esc to cancel the box',
+        hintView: 'Wheel zooms · drag pans · double-click fits or shows 1:1 · ←/→ pages · S selects · Esc closes',
+        sent: 'Sent to the composer',
+        copied: 'Copied to the clipboard',
+        fallback: 'No composer found; copied to the clipboard — press Ctrl+V to send',
+        noCaps: 'No vision router detected (the picture still reaches the conversation)',
+        tooBig: 'Selection too large (over 40 MP); box a smaller region',
+        failed: 'Export failed',
+        pageFirst: 'Cancel the box before changing pictures',
+        noClipboard: 'This environment cannot copy images',
+        annotate: 'Annotate',
+        annotateTitle: 'Annotate this picture (A)',
+        inkbar: 'Annotation tools',
+        toolNames: { select: 'Move', crop: 'Crop', rect: 'Rect', ellipse: 'Ellipse', arrow: 'Arrow', pen: 'Pen', text: 'Text' },
+        toolTitles: {
+          select: 'Move / select (V)',
+          crop: 'Crop (C)',
+          rect: 'Rectangle (R)',
+          ellipse: 'Ellipse (E)',
+          arrow: 'Arrow (A)',
+          pen: 'Pen (P)',
+          text: 'Text (T)',
+        },
+        undo: 'Undo',
+        redo: 'Redo',
+        remove: 'Delete',
+        clear: 'Clear',
+        send: 'Send',
+        save: 'Save',
+        hintInk: 'Drag to draw · V moves/selects · Ctrl+Z undoes · Enter sends · Esc closes',
+        compare: 'Compare',
+        compareTitle: 'Compare with another picture in this set (D)',
+        compareSide: 'Side by side',
+        compareOverlay: 'Overlay',
+        compareDiff: 'Diff',
+        compareSwap: 'Swap',
+        compareClose: 'Close compare',
+        compareSendDiff: 'Send diff',
+        compareSaveDiff: 'Save diff',
+        compareDiffEmpty: 'Compute the diff first',
+        compareOnlyOne: 'Only one picture in this set — nothing to compare',
+        compareHint: 'Both pictures must load before a diff',
+        compareLoading: 'Loading…',
+        saved: 'Saved: {path}',
+        saveFailed: 'Save failed: {reason}',
+        dirtyTitle: 'Unsaved annotations',
+        dirtyKeep: 'Keep editing',
+        dirtyCopy: 'Copy and leave',
+        dirtyDrop: 'Discard (Esc)',
+        nothingToSend: 'Draw or box something first',
+        textPlaceholder: 'Annotation text…',
+        format: 'Format',
+        formatPng: 'PNG',
+        formatJpeg: 'JPG',
+        formatTitle: 'Export format (PNG is lossless; JPG is smaller)',
+        prefsTitle: 'Preferences',
+        prefsColor: 'Default colour',
+        prefsWidth: 'Default width',
+        prefsCompare: 'Default compare mode',
+        prefsCloseAfterSend: 'Close the viewer after sending',
+        prefsProvenance: 'Add the source line to the instruction',
+        prefsAutoSend: 'Auto-send after paste (risky, off by default)',
+        prefsReset: 'Reset',
+        prefsDone: 'Done',
+        prefsNote: 'Stored on this machine only (localStorage); never written to the profile.',
+        viewerLabel: 'Image viewer',
+        prevTitle: 'Previous (←)',
+        nextTitle: 'Next (→)',
+        zoomOutTitle: 'Zoom out (-)',
+        zoomInTitle: 'Zoom in (+)',
+        fit: 'Fit',
+        fitTitle: 'Fit to window (0 / double-click)',
+        actualTitle: 'Actual pixels (1)',
+        copyImage: 'Copy',
+        copyImageTitle: 'Copy this picture to the clipboard (Ctrl+C)',
+        refresh: 'Refresh',
+        refreshTitle: 'Re-read the file (picks up overwrites)',
+        close: 'Close',
+        closeTitle: 'Close (Esc)',
       },
     }
-    /** The table the viewer reads; `COPY.en` lands with the locale hook. */
-    const TEXT = COPY.zh
+    /**
+     * Follow the host's UI language, read from `<html lang>` (the locale service
+     * keeps that attribute in sync). `navigator.language` is the fallback for a page
+     * that never sets it; a reload picks up a language switch, because the copy is
+     * baked into the DOM when each surface is built.
+     * @returns {'zh' | 'en'} the dictionary to use.
+     */
+    function detectLang() {
+      try {
+        const tag = String(document.documentElement.getAttribute('lang') || navigator.language || 'zh').toLowerCase()
+        return tag.startsWith('zh') ? 'zh' : 'en'
+      } catch {
+        return 'zh'
+      }
+    }
+    /** The table the viewer reads, resolved once per page load. */
+    const TEXT = COPY[detectLang()] ?? COPY.zh
 
     /** Where this machine keeps the viewer's own preferences (not the profile). */
     const PREFS_KEY = 'dsh-image-preview:prefs'
@@ -3587,7 +3711,7 @@ window.__ModuleLoader__.load({
         // or a screen reader keeps reading the conversation underneath it.
         root.setAttribute('role', 'dialog')
         root.setAttribute('aria-modal', 'true')
-        root.setAttribute('aria-label', '图片查看器')
+        root.setAttribute('aria-label', TEXT.viewerLabel)
         // Mark it as ours too: an absolute path inside a failure message must not
         // be decorated by this very plugin (that put a thumbnail inside the
         // viewer's own error text and cost one extra read per failure).
@@ -3622,13 +3746,13 @@ window.__ModuleLoader__.load({
           return element
         }
 
-        prevButton = button('‹', '上一张（←）', () => {
+        prevButton = button('‹', TEXT.prevTitle, () => {
           pageTo(index - 1)
         })
-        nextButton = button('›', '下一张（→）', () => {
+        nextButton = button('›', TEXT.nextTitle, () => {
           pageTo(index + 1)
         })
-        button('−', '缩小（-）', () => {
+        button('−', TEXT.zoomOutTitle, () => {
           const box = stage.getBoundingClientRect()
           zoomAt(0.8, box.width / 2, box.height / 2)
         })
@@ -3640,16 +3764,16 @@ window.__ModuleLoader__.load({
         zoomLabel.style.cursor = 'default'
         zoomLabel.textContent = '100%'
         tools.appendChild(zoomLabel)
-        button('+', '放大（+）', () => {
+        button('+', TEXT.zoomInTitle, () => {
           const box = stage.getBoundingClientRect()
           zoomAt(1.25, box.width / 2, box.height / 2)
         })
-        button('适应', '适应窗口（0 / 双击）', fit)
-        button('1:1', '原始像素（1）', actual)
-        button('复制', '把这张图复制到剪贴板（Ctrl+C）', () => {
+        button(TEXT.fit, TEXT.fitTitle, fit)
+        button('1:1', TEXT.actualTitle, actual)
+        button(TEXT.copyImage, TEXT.copyImageTitle, () => {
           copyImage().catch(() => {})
         })
-        button('刷新', '重新读取文件（覆盖写过的图也能更新）', () => {
+        button(TEXT.refresh, TEXT.refreshTitle, () => {
           bust = Date.now()
           show(index)
         })
@@ -3659,7 +3783,7 @@ window.__ModuleLoader__.load({
         annotateButton.setAttribute('aria-pressed', 'false')
         compareButton = button(TEXT.compare, TEXT.compareTitle, toggleCompare)
         prefsButton = button('⚙', TEXT.prefsTitle, togglePrefs)
-        button('关闭', '关闭（Esc）', () => close())
+        button(TEXT.close, TEXT.closeTitle, () => close())
 
         const stageElement = document.createElement('div')
         stageElement.className = 'dsh-ipv-stage'
