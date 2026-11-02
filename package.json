@@ -22,6 +22,7 @@
     "index.js",
     "client.js",
     "cordis.patch.yml",
+    "compatibility.json",
     "README.md",
     "CHANGELOG.md",
     "LICENSE",

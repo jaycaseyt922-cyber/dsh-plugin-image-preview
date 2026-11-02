@@ -293,8 +293,8 @@ git config --get-all credential.helper   # 有没有 store 之类的明文 helpe
 ### 兼容性承诺
 
 - 只承诺 **Windows 盘符路径**（`C:\…` / `C:/…`）；POSIX 路径不在范围内。
-- 宿主版本没有下限声明（`engines` 只管 Node ≥ 20）；契约变化按上表查，不靠猜。
-- 发布包**不带** `tools/`（它会再起一个应用实例），带 `test/`，所以装完能 `npm test`。
+- 实测过的宿主版本写在 `compatibility.json`（`releaseTargets` / `latestTested`，格式照 `dsh-image-viewer`）：当前是 `0.2.1-rc.5` —— 0.5.0 的选区、标注、一次 paste、保存路由都在它上面实跑过。没有下限声明（`engines` 只管 Node ≥ 20）；契约变化按上表查，不靠猜。
+- 发布包**不带** `tools/`（它会再起一个应用实例），带 `test/` 与 `compatibility.json`，所以装完能 `npm test`。
 
 ## 发布与分享
 
