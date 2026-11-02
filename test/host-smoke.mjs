@@ -3,7 +3,7 @@
 // creates itself. Portable: no local absolute paths.
 // Run with: node test/host-smoke.mjs
 import { EventEmitter } from 'node:events'
-import { writeFileSync } from 'node:fs'
+import { existsSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { Writable } from 'node:stream'
 import { apply } from '../index.js'
@@ -169,6 +169,24 @@ results.routeUnknown = unknown.status
 const caps = request('/image-preview/capabilities')
 results.capabilities = { status: caps.status, body: JSON.parse(String(caps.body ?? '{}')) }
 
+// --- save: the annotator's only write route ---------------------------------
+const pngBytes = Buffer.concat([Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]), Buffer.alloc(24, 7)])
+const saved = request('/image-preview/save', 'POST', pngBytes)
+const savedBody = JSON.parse(String(saved.body ?? '{}'))
+const savedPath = typeof savedBody.path === 'string' ? savedBody.path : ''
+const savedBytes = savedPath !== '' && existsSync(savedPath) ? readFileSync(savedPath) : Buffer.alloc(0)
+results.save = {
+  status: saved.status,
+  ok: savedBody.ok === true,
+  wroteFile: savedPath !== '',
+  named: savedPath.includes('image-preview-') && savedPath.endsWith('.png'),
+  bytes: savedBytes.length,
+  sameBytes: savedBytes.length === pngBytes.length && savedBytes.subarray(0, 8).equals(pngBytes.subarray(0, 8)),
+}
+if (savedPath !== '') unlinkSync(savedPath)
+const notPng = request('/image-preview/save', 'POST', Buffer.from('definitely not a png'))
+results.saveRejected = notPng.status
+
 const diag = request('/image-preview/diag?path=' + encodeURIComponent(fixture.png))
 results.diag = { status: diag.status, ok: JSON.parse(String(diag.body)).ok }
 
@@ -221,6 +239,8 @@ const reportRefused = request('/image-preview/client-report', 'POST', JSON.strin
 results.reportRefused = reportRefused.status
 // The capability answer names tools, not files: it is still fenced like the rest.
 results.capabilitiesRefused = request('/image-preview/capabilities').status
+// So is the one route that writes.
+results.saveRefused = request('/image-preview/save', 'POST', pngBytes).status
 rejectAs = undefined
 const reportTrusted = request('/image-preview/client-report', 'POST', JSON.stringify({ stage: 'smoke-trusted' }))
 results.reportTrusted = reportTrusted.status
@@ -263,6 +283,12 @@ if (results.capabilities?.status !== 200) failures.push('capabilities')
 if (results.capabilities?.body?.vision?.describe !== true) failures.push('capabilitiesDescribe')
 if (results.capabilities?.body?.vision?.ocr !== false) failures.push('capabilitiesOcr')
 if (results.capabilitiesRefused !== 401) failures.push('capabilitiesFence')
+// The save route writes a PNG into the plugin's temp directory and reports it.
+if (results.save?.status !== 200 || results.save?.ok !== true) failures.push('save')
+if (results.save?.wroteFile !== true || results.save?.named !== true) failures.push('savePath')
+if (results.save?.sameBytes !== true || results.save?.bytes !== pngBytes.length) failures.push('saveBytes')
+if (results.saveRejected !== 415) failures.push('saveRejectsNonPng')
+if (results.saveRefused !== 401) failures.push('saveFence')
 if (results.reportTrusted !== 204) failures.push('reportTrusted')
 // The binary answer is the transport the page uses now.
 if (results.routePostBinary?.status !== 200) failures.push('postBinary')

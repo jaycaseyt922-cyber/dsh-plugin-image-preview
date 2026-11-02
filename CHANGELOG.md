@@ -4,6 +4,34 @@ Notable changes to `dsh-plugin-image-preview`. Format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), versions follow
 [SemVer](https://semver.org/) (pre-1.0: a minor bump may change behaviour).
 
+## [0.5.0] - 2026-11-02
+
+The viewer annotates now: draw on the picture, crop it, and send the result. Every
+coordinate is a source-image pixel, so marks and crop land exactly where they were
+drawn at any zoom.
+
+### Added
+- 「标注」 (`A`): rectangle, ellipse, arrow, pen and text, plus a crop region, six
+  colours and three stroke widths (which also size the text).
+- Undo/redo over `{ marks, crop }` (50 steps), delete the selected mark, clear all;
+  `Ctrl+Z` / `Ctrl+Shift+Z` / `Delete`.
+- Three exits: `Enter` sends the annotated PNG with the instruction, `Ctrl+C` copies
+  it, `Ctrl+S` asks the host to write it and shows the path it used.
+- `POST /image-preview/save` on the host half: raw PNG bytes (never base64), 32 MB
+  cap, magic-number check, and a host-generated name inside `%TEMP%\image-preview`.
+  The client's own name is ignored, so a path can never be traversed.
+- A "discard the marks?" question before closing or paging away from unsaved work:
+  keep editing / copy then leave / discard (`Esc`). Marks stay drawn after leaving
+  the tool bar; only closing or paging asks.
+- Harness covers the annotator end to end (draw, undo/redo, text, crop, send, the
+  question); probe assertions cover annotate → save → send in a real host.
+
+### Changed
+- One canvas serves both modes: the quick selection and the annotator share the same
+  transform and repaint in the picture's own frame.
+- A fresh open always starts with no marks; switching pictures with unsaved marks
+  asks first instead of silently dropping them.
+
 ## [0.4.0] - 2026-11-02
 
 A picture is now something you can hand to the model: box a region in the viewer,

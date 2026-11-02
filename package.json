@@ -1,6 +1,6 @@
 {
   "name": "dsh-plugin-image-preview",
-  "version": "0.4.0",
+  "version": "0.5.0",
   "type": "module",
   "license": "MIT",
   "description": "Preview local images inside a DeepSeek Harness conversation: bare image paths in prose become thumbnails, a path alone on its line becomes an inline preview, a preview_image tool card shows a gallery, and a full-screen viewer handles zoom, pan, paging and clipboard copy.",

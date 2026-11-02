@@ -145,6 +145,60 @@
     }
   }
 
+  // 7. 0.5：标注 → Ctrl+S 保存（走 host 路由）→ Enter 发送
+  const chipForInk = g.host.querySelector('.dsh-ip-chip')
+  if (chipForInk !== null && chipForInk !== undefined) {
+    chipForInk.click()
+    await sleep(1200)
+    const annotateBtn = [...document.querySelectorAll('.dsh-ipv-btn')].find((b2) => b2.textContent === '标注')
+    if (annotateBtn !== undefined) {
+      annotateBtn.click()
+      await sleep(150)
+      const inkLayer = document.querySelector('.dsh-ipv-ink')
+      const inkBox = document.querySelector('.dsh-ipv-stage').getBoundingClientRect()
+      const paint = (type, x, y) => inkLayer.dispatchEvent(new PointerEvent(type, {
+        bubbles: true,
+        cancelable: true,
+        clientX: x,
+        clientY: y,
+        button: 0,
+        pointerId: 31,
+      }))
+      const rectTool = [...document.querySelectorAll('.dsh-ipv-tool')].find((b2) => b2.dataset.tool === 'rect')
+      if (rectTool !== undefined) rectTool.click()
+      paint('pointerdown', inkBox.left + 120, inkBox.top + 100)
+      paint('pointermove', inkBox.left + 300, inkBox.top + 200)
+      paint('pointerup', inkBox.left + 300, inkBox.top + 200)
+      await sleep(150)
+      const labelAfterDraw = inkLayer.getAttribute('aria-label')
+
+      document.querySelector('.dsh-ipv-root').dispatchEvent(new KeyboardEvent('keydown', { key: 's', ctrlKey: true, bubbles: true }))
+      await sleep(1600)
+      const toast = document.querySelector('.dsh-ipv-status')
+      const toastText = toast === null ? '' : toast.textContent
+      const savedPath = toastText.startsWith('已保存：') ? toastText.slice(4) : ''
+
+      const tilesBefore = document.querySelectorAll('img[alt^=image-preview-]').length
+      document.querySelector('.dsh-ipv-root').dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }))
+      await sleep(1800)
+      const tilesAfter = [...document.querySelectorAll('img[alt^=image-preview-]')]
+      const editor = document.querySelector('[data-lexical-editor=true]')
+      out.annotate = {
+        labelAfterDraw,
+        toastText,
+        savedPath,
+        newTiles: tilesAfter.length - tilesBefore,
+        editorHasInstruction: editor === null ? null : (editor.innerText || '').includes('看这张图'),
+        viewerAfterSend: getComputedStyle(document.querySelector('.dsh-ipv-root')).display,
+      }
+      for (const tile of tilesAfter) {
+        const button = tile.closest('button')
+        if (button !== null) button.click()
+      }
+      if (editor !== null) editor.textContent = ''
+    }
+  }
+
   for (const id of ['ip-h1', 'ip-h2', 'ip-h3', 'ip-h4']) document.getElementById(id)?.remove()
   return out
 })()

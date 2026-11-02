@@ -104,11 +104,31 @@ POST /image-preview/read   请求体 {"path":"C:\\…"}   Accept: application/oc
 
 已知边界：选区按**源图像素**存储、导出按原图裁剪，不吃缩放；单次导出上限 40 MP（超过会提示先框小一点）；附件最终能不能发出去还取决于宿主的 attachment intake 策略（尺寸/类型/数量）。
 
+## 标注与三出口（0.5.0）
+
+查看器里点「标注」（或按 `A`），底栏换成工具行：
+
+```
+绘   选择 V · 裁剪 C · 矩形 R · 椭圆 E · 箭头 A · 画笔 P · 文字 T
+色   6 色              粗  2 / 4 / 8（同时决定字号 18 / 26 / 40）
+编辑 撤销 Ctrl+Z · 重做 Ctrl+Shift+Z · 删除 Delete · 清空
+出口 发送 Enter · 复制 Ctrl+C · 保存 Ctrl+S · 关闭 Esc
+```
+
+- **坐标一律是源图像素**：画在哪、导出就在哪，0.05× 与 400% 看到的和导出的完全一致。屏幕线宽有 1 设备像素下限（缩小时不会消失），导出仍用原始宽度。
+- **删除**只删选中的那一笔（选择工具点一下选中，蓝色虚线框标出来）；**清空**一次丢掉全部，但可撤销。
+- **裁剪**只决定导出区域：框外压暗，发送/复制/保存都按裁剪区出图，不裁剪就是整张图。
+- **保存**走 host 路由 `POST /image-preview/save`：前端发 PNG 原始字节（不 base64），宿主校验魔数（只收 PNG）、上限 32 MB、文件名由宿主按时间戳重生成（不信任前端给的名字），写进 `%TEMP%\image-preview\`，返回绝对路径并显示在提示条里。
+- **未导出保护**：有标注时关闭查看器或翻页会先问「继续编辑 / 复制后离开 / 放弃（Esc）」，连按两次 `Esc` 才是放弃。离开工具行（按一次 `Esc`）**不丢**标注，标注仍然画在图上。
+- 文字工具用行内编辑框：支持 `Shift+Enter` 换行，输入法组合期间的 Enter/Escape 不会误提交或取消。
+
+已知边界：单张图最多 200 笔标注、画笔抽稀到 500 点；导出上限 40 MP；标注只存在于这一次导出里，不会写回原图。
+
 ## 两半的分工
 
 | 半边 | 文件 | 职责 |
 | --- | --- | --- |
-| Host | `index.js` | `preview_image` 工具（存在性、魔数、大小校验；`dir` 取最新；去重与超上限上报）；`output.presentationMeta` 把出图清单写进结果元数据；一段系统提示公告；六条只读/自检路由 `/image-preview/{read,file,blob,diag,client-report,capabilities}`（全部先过 Host/Origin 与会话 cookie 闸门；`read` 是 POST + JSON 请求体，`file`/`blob` 直出字节，只回六种位图并按魔数判定，`no-store`；`capabilities` 只回工具是否存在） |
+| Host | `index.js` | `preview_image` 工具（存在性、魔数、大小校验；`dir` 取最新；去重与超上限上报）；`output.presentationMeta` 把出图清单写进结果元数据；一段系统提示公告；七条路由 `/image-preview/{read,file,blob,diag,client-report,capabilities,save}`（全部先过 Host/Origin 与会话 cookie 闸门；`read` 是 POST + JSON 请求体，`file`/`blob` 直出字节，只回六种位图并按魔数判定，`no-store`；`capabilities` 只回工具是否存在；`save` 是唯一的写路由，只收 PNG 原始字节、文件名由宿主重生成） |
 | Client | `client.js` | `tool.call.toolview` 的 `preview_image` 卡（优先读结果元数据，`dir` 调用也出图）；正文路径的缩略图与整块预览（MutationObserver，只追加、不切文本，自己插入的元素带 `data-ip-own`）；悬停预览；全屏查看器（缩放/平移/翻页/复制/刷新/选区与看图）；同一路径的字节按 `(路径, 刷新序号)` 缓存，一屏多处引用只取一次 |
 
 **取图有三层兜底**：先试本插件自己的 `POST /image-preview/read`（路径走 JSON 请求体，避开 `dsh-app://` 代理对查询串的重编码），再试 `GET /image-preview/file`、`GET /image-preview/blob/<base64url>`，最后试宿主官方的 `api/file`；每条都用 `document.baseURI`／页面 URL／origin／`dsh-app://app/` 四种基址和路径的两种斜杠写法；`<img>` 直接取失败时改用 `fetch` 取字节转 blob 再显示。三层都失败才报错，并把 HTTP 状态、实际 URL、`baseURI` 写在屏幕上。
@@ -381,6 +401,7 @@ gh repo create dsh-plugin-image-preview --public --source=. --push
 | `/image-preview/diag` | GET | 存活 + 各面挂载；**带凭证**才回路径细节与 `recent` | 无凭证只回存活 |
 | `/image-preview/client-report` | POST | 客户端挂载上报 | 要 |
 | `/image-preview/capabilities` | GET | 宿主有哪些 `vision_*` 工具（只回布尔，不带路径） | 要 |
+| `/image-preview/save` | POST | 把标注 PNG 写进 `%TEMP%\image-preview\`，回绝对路径（唯一写路由，只收 PNG 原始字节） | 要 |
 
 不开新端口，全部复用宿主已有端口。
 
@@ -414,3 +435,4 @@ powershell -NoProfile -ExecutionPolicy Bypass -File tools\probe.ps1 -Status   # 
 - 文案是中文硬编码，没有接 `ctx.locale`（新增文案已集中到 `client.js` 的 `COPY.zh`，0.6 接 locale 时只换那一处）。
 - 「看图」依赖宿主的编辑器是 Lexical（`[data-lexical-editor="true"]`）；宿主换成别的编辑器时，选区的裁剪/复制仍可用，回填会退化成“复制到剪贴板 + 提示”。
 - 程序化 paste 需要 `DataTransfer` / `ClipboardEvent` / `File` 三个构造函数都在；桌面壳与浏览器都有，裸 WebView 里可能没有。
+- 「保存」写到 `%TEMP%\image-preview\`，**不自动清理**（临时目录归系统回收）；提示条里的路径是真路径，可以复制出去用。文件名由宿主生成，前端给的名字会被忽略——这是故意的，比“信任前端”少一类漏洞。

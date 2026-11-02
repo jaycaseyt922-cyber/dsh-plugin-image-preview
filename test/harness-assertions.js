@@ -146,6 +146,150 @@
   for (const node of document.querySelectorAll('img[data-test-tile="1"]')) node.remove()
   fakeEditor.remove()
 
+  // 0.5 annotator: draw, undo/redo, crop, then send the annotated picture.
+  if (firstFigure) {
+    pasted = null
+    const annotateComposer = document.createElement('div')
+    annotateComposer.setAttribute('data-lexical-editor', 'true')
+    annotateComposer.contentEditable = 'true'
+    annotateComposer.style.cssText = 'position:fixed;left:8px;bottom:52px;width:220px;height:32px;border:1px solid #ccc'
+    annotateComposer.addEventListener('paste', (event) => {
+      event.preventDefault()
+      const file = event.clipboardData === null ? null : event.clipboardData.files[0]
+      pasted = {
+        name: file === undefined || file === null ? '' : file.name,
+        type: file === undefined || file === null ? '' : file.type,
+        text: event.clipboardData === null ? '' : event.clipboardData.getData('text/plain'),
+      }
+      const tile = document.createElement('img')
+      tile.alt = pasted.name
+      tile.dataset.testTile = '1'
+      document.body.append(tile)
+    })
+    document.body.append(annotateComposer)
+
+    firstFigure.click()
+    await wait(500)
+    const annotateButton = [...document.querySelectorAll('.dsh-ipv-btn')].find((b) => b.textContent === '标注')
+    out.annotate = { button: annotateButton !== undefined }
+    if (annotateButton !== undefined) {
+      annotateButton.click()
+      await wait(120)
+      const annotateBar = document.querySelector('.dsh-ipv-inkbar-annotate')
+      const toolIds = [...document.querySelectorAll('.dsh-ipv-tool')].map((b) => b.dataset.tool)
+      const inkLayer = document.querySelector('.dsh-ipv-ink')
+      const stageBox2 = document.querySelector('.dsh-ipv-stage').getBoundingClientRect()
+      const draw = (type, x, y) => inkLayer.dispatchEvent(new PointerEvent(type, {
+        bubbles: true,
+        cancelable: true,
+        clientX: x,
+        clientY: y,
+        button: 0,
+        pointerId: 21,
+      }))
+      const pickTool = (id) => {
+        const target = [...document.querySelectorAll('.dsh-ipv-tool')].find((b) => b.dataset.tool === id)
+        if (target !== undefined) target.click()
+      }
+      const press = (key, extra = {}) => document.querySelector('.dsh-ipv-root').dispatchEvent(
+        new KeyboardEvent('keydown', { key, bubbles: true, ...extra }),
+      )
+
+      pickTool('rect')
+      draw('pointerdown', stageBox2.left + 100, stageBox2.top + 100)
+      draw('pointermove', stageBox2.left + 260, stageBox2.top + 220)
+      draw('pointerup', stageBox2.left + 260, stageBox2.top + 220)
+      await wait(100)
+      const afterDraw = inkLayer.getAttribute('aria-label')
+      press('z', { ctrlKey: true })
+      await wait(80)
+      const afterUndo = inkLayer.getAttribute('aria-label')
+      press('z', { ctrlKey: true, shiftKey: true })
+      await wait(80)
+      const afterRedo = inkLayer.getAttribute('aria-label')
+      pickTool('crop')
+      draw('pointerdown', stageBox2.left + 140, stageBox2.top + 140)
+      draw('pointermove', stageBox2.left + 300, stageBox2.top + 240)
+      draw('pointerup', stageBox2.left + 300, stageBox2.top + 240)
+      await wait(100)
+      const afterCrop = inkLayer.getAttribute('aria-label')
+
+      // Text tool: the inline editor takes the keystrokes, Escape closes the viewer's
+      // question instead of the viewer, and "discard" is the only way out with marks.
+      pickTool('text')
+      draw('pointerdown', stageBox2.left + 200, stageBox2.top + 200)
+      await wait(80)
+      const textBox = document.querySelector('.dsh-ipv-textedit')
+      const textEditorOpened = textBox !== null
+      if (textBox !== null) {
+        textBox.textContent = '这里有问题'
+        textBox.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }))
+      }
+      await wait(100)
+      const afterText = inkLayer.getAttribute('aria-label')
+
+      out.annotateDraft = {
+        bar: getComputedStyle(annotateBar).display,
+        tools: toolIds,
+        afterDraw,
+        afterUndo,
+        afterRedo,
+        afterCrop,
+        textEditorOpened,
+        afterText,
+      }
+      press('Enter')
+      await wait(900)
+      out.annotateSend = {
+        pasted,
+        viewer: getComputedStyle(document.querySelector('.dsh-ipv-root')).display,
+        tile: document.querySelector('img[data-test-tile="1"]') !== null,
+      }
+
+      // Reopen with marks on screen: the first Escape leaves the tool bar, the
+      // second asks, and the third discards (the dialog's own "放弃（Esc）").
+      firstFigure.click()
+      await wait(400)
+      const secondAnnotate = [...document.querySelectorAll('.dsh-ipv-btn')].find((b) => b.textContent === '标注')
+      secondAnnotate.click()
+      await wait(100)
+      pickTool('ellipse')
+      draw('pointerdown', stageBox2.left + 120, stageBox2.top + 120)
+      draw('pointermove', stageBox2.left + 240, stageBox2.top + 220)
+      draw('pointerup', stageBox2.left + 240, stageBox2.top + 220)
+      await wait(100)
+      const beforeLeaving = inkLayer.getAttribute('aria-label')
+      press('Escape')
+      await wait(100)
+      const leftBar = getComputedStyle(document.querySelector('.dsh-ipv-inkbar-annotate')).display
+      const stillDrawn = inkLayer.getAttribute('aria-label')
+      press('Escape')
+      await wait(120)
+      const dirtyShown = document.querySelector('.dsh-ipv-dirty') !== null
+      const dirtyButtons = [...document.querySelectorAll('.dsh-ipv-dirty .dsh-ipv-inkbtn')].map((b) => b.textContent)
+      press('Escape')
+      await wait(150)
+      out.annotateDirty = {
+        beforeLeaving,
+        leftBar,
+        stillDrawn,
+        dirtyShown,
+        dirtyButtons,
+        dialogGone: document.querySelector('.dsh-ipv-dirty') === null,
+        viewerAfterDrop: getComputedStyle(document.querySelector('.dsh-ipv-root')).display,
+      }
+      press('Enter')
+      await wait(900)
+      out.annotateSend = {
+        pasted,
+        viewer: getComputedStyle(document.querySelector('.dsh-ipv-root')).display,
+        tile: document.querySelector('img[data-test-tile="1"]') !== null,
+      }
+    }
+    for (const node of document.querySelectorAll('img[data-test-tile="1"]')) node.remove()
+    annotateComposer.remove()
+  }
+
   window.__result = out
   return 'ok'
 })()

@@ -21,8 +21,9 @@
  * @module dsh-plugin-image-preview
  */
 
-import { closeSync, createReadStream, openSync, readSync, readFileSync, statSync } from 'node:fs'
+import { closeSync, createReadStream, mkdirSync, openSync, readSync, readFileSync, statSync, writeFileSync } from 'node:fs'
 import { readdir, stat } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
 import path from 'node:path'
 
 /** Stable cordis plugin name. */
@@ -32,6 +33,10 @@ export const inject = ['tools', 'systemPrompt', 'webServer']
 
 /** The route prefix this plugin owns; nothing else may claim it. */
 const ROUTE = '/image-preview'
+/** Where "save" writes annotated pictures: one temp directory the plugin owns. */
+const SAVE_DIR = path.join(tmpdir(), 'image-preview')
+/** One save may carry this many bytes; the browser half exports smaller than this. */
+const MAX_SAVE_BYTES = 32 * 1024 * 1024
 /** How many images one call may show. */
 const MAX_IMAGES = 24
 /** Refuse a single file above this size; a preview is not a transfer. */
@@ -749,6 +754,70 @@ function registerImageRoute(ctx) {
     sendJson(res, 200, { ok: true, vision: capabilityCache.value, base: ROUTE, at: now })
   }
 
+  /**
+   * Serve `POST /image-preview/save`: write one annotated PNG and answer its path.
+   *
+   * The browser half cannot write files, so this is the plugin's only writing
+   * route. It takes the raw PNG bytes (never base64: one more copy of a 30 MB
+   * string is exactly what 0.3.0 removed elsewhere), regenerates the file name
+   * here (a client-supplied name is a path-traversal bug waiting to happen), and
+   * refuses anything that is not a PNG by magic number.
+   */
+  const serveSave = (req, res) => {
+    const entry = remember({ at: Date.now(), method: req.method, pathname: ROUTE + '/save', hasQuery: false })
+    if (req.method !== 'POST') {
+      entry.status = 405
+      res.writeHead(405, { allow: 'POST', 'content-type': 'text/plain; charset=utf-8' })
+      res.end('POST only')
+      return
+    }
+    if (refuse(req, res, entry) === true) return
+    const chunks = []
+    let size = 0
+    let tooBig = false
+    req.on('data', (chunk) => {
+      size += chunk.length
+      if (size > MAX_SAVE_BYTES) {
+        tooBig = true
+        return
+      }
+      chunks.push(chunk)
+    })
+    req.on('error', () => {
+      /* the client went away; nothing left to answer */
+    })
+    req.on('end', () => {
+      entry.bodyBytes = size
+      if (tooBig === true) {
+        entry.status = 413
+        sendJson(res, 413, { ok: false, error: '图片太大（上限 ' + Math.round(MAX_SAVE_BYTES / 1024 / 1024) + ' MB）' })
+        return
+      }
+      const bytes = Buffer.concat(chunks)
+      const isPng = bytes.length >= 8 && bytes[0] === 0x89 && bytes[1] === 0x50 && bytes[2] === 0x4e && bytes[3] === 0x47
+      if (isPng !== true) {
+        entry.status = 415
+        sendJson(res, 415, { ok: false, error: '只接受 PNG' })
+        return
+      }
+      try {
+        mkdirSync(SAVE_DIR, { recursive: true })
+        const at = new Date()
+        const pad = (value) => String(value).padStart(2, '0')
+        const stamp = at.getFullYear() + pad(at.getMonth() + 1) + pad(at.getDate())
+          + '-' + pad(at.getHours()) + pad(at.getMinutes()) + pad(at.getSeconds())
+          + '-' + String(at.getMilliseconds()).padStart(3, '0')
+        const target = path.join(SAVE_DIR, 'image-preview-' + stamp + '.png')
+        writeFileSync(target, bytes)
+        entry.status = 200
+        sendJson(res, 200, { ok: true, path: target, bytes: bytes.length })
+      } catch (error) {
+        entry.status = 500
+        sendJson(res, 500, { ok: false, error: String((error instanceof Error ? error.message : error) || 'write failed') })
+      }
+    })
+  }
+
   /** Serve `GET|HEAD /image-preview/blob/<base64url path>` and `/image-preview/file?path=…`. */
   const handler = (req, res) => {
     const url = typeof req.url === 'string' ? req.url : ''
@@ -759,7 +828,8 @@ function registerImageRoute(ctx) {
     const isRead = pathname === ROUTE + '/read'
     const isReport = pathname === ROUTE + '/client-report'
     const isCaps = pathname === ROUTE + '/capabilities'
-    if (!isQueryRoute && encodedAt === '' && !isDiag && !isRead && !isReport && !isCaps) {
+    const isSave = pathname === ROUTE + '/save'
+    if (!isQueryRoute && encodedAt === '' && !isDiag && !isRead && !isReport && !isCaps && !isSave) {
       sendText(res, 404, 'unknown route')
       return
     }
@@ -773,6 +843,10 @@ function registerImageRoute(ctx) {
     }
     if (isCaps === true) {
       serveCapabilities(req, res)
+      return
+    }
+    if (isSave === true) {
+      serveSave(req, res)
       return
     }
     const entry = remember({ at: Date.now(), method: req.method, pathname, hasQuery: url.includes('?') })
