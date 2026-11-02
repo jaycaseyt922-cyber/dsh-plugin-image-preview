@@ -4,6 +4,22 @@ Notable changes to `dsh-plugin-image-preview`. Format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), versions follow
 [SemVer](https://semver.org/) (pre-1.0: a minor bump may change behaviour).
 
+## [0.7.0] - 2026-11-02
+
+### Added
+- `preview_image({ recent: true })`: list the pictures this conversation has already
+  shown, newest first (with the usual `limit`, max 24), instead of new files. The
+  list is per Agent — one Agent is one conversation — so two conversations never see
+  each other's pictures; a call without an Agent keeps one process-wide list. Only
+  pictures that really resolved are remembered, and an empty conversation answers
+  `这个会话还没有显示过图片` instead of an empty card.
+- Host smoke covers the ordering, the limit, the per-conversation isolation and the
+  no-Agent fallback.
+
+### Changed
+- The guidance now mentions `recent: true` as the way to bring the earlier pictures
+  back for a second look or a before/after comparison.
+
 ## [0.6.0] - 2026-11-02
 
 ### Added

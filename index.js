@@ -43,6 +43,39 @@ const MAX_IMAGES = 24
 const MAX_BYTES = 64 * 1024 * 1024
 /** How many leading bytes the container sniff reads (an AVIF brand scan needs the ftyp box, not only its magic). */
 const SNIFF_BYTES = 32
+/** How many pictures one conversation remembers for `recent: true`. */
+const RECENT_LIMIT = 50
+
+/**
+ * Recently shown pictures, one list per conversation.
+ *
+ * The tool runs with an Agent in `exec`; one Agent is one conversation for its
+ * whole life, so using the object as a WeakMap key groups by session without
+ * reading any of the session's internals. A call without an Agent (a test, a
+ * future caller) falls back to one process-wide list.
+ */
+const recentByAgent = new WeakMap()
+const recentFallback = []
+
+/** The list `recent: true` reads and every successful show appends to. */
+function recentListFor(exec) {
+  const agent = exec?.agent
+  if (agent === undefined || agent === null || typeof agent !== 'object') return recentFallback
+  let list = recentByAgent.get(agent)
+  if (list === undefined) {
+    list = []
+    recentByAgent.set(agent, list)
+  }
+  return list
+}
+
+/** Remember one shown picture: newest last, one entry per path, bounded. */
+function rememberShown(list, file) {
+  const at = list.findIndex((entry) => entry.path === file)
+  if (at >= 0) list.splice(at, 1)
+  list.push({ path: file, at: Date.now() })
+  while (list.length > RECENT_LIMIT) list.shift()
+}
 
 /** The containers this preview accepts, keyed by extension, value is what the bytes must say. */
 const MEDIA_TYPES = {
@@ -59,6 +92,7 @@ const GUIDANCE = [
   '本机装有自研插件 dsh-plugin-image-preview（会话内图片预览）：',
   '· 默认做法：把图片路径写进**正文**（优先正斜杠，如 C:/Users/me/fig1.png）。正文不会被工具行折叠，路径会直接渲染成缩略图或整块预览，用户一定能看到。',
   '· preview_image 卡片是补充手段（想放在工具区里时用）；注意工具行在 compact 显示模式下会被折进“已完成…”，用户要先展开才能看到卡片。',
+  '· preview_image({ recent: true }) 会把本会话已经显示过的图按新→旧再列一遍（可配 limit），适合“把刚才那几张再摆一次”或做前后对比，不用重新翻目录。',
   '· 只认盘符绝对路径（C:\\… 或 C:/…）与 png/jpg/jpeg/webp/gif/bmp/avif；file:///、UNC（\\\\server\\…）、带 ? 的路径不会被识别。',
   '· 写路径时优先用正斜杠：Markdown 会把反斜杠当转义符，`\\_`、`\\(`、`\\)` 这类组合会把反斜杠吃掉（本机实测 `Documents\\_dsh_tmp` 渲染成 `Documents_dsh_tmp`）。插件会尝试修复，但别指望它总能猜对。',
 ].join('\n')
@@ -296,14 +330,15 @@ function createTool(ctx) {
   return {
     name: 'preview_image',
     description:
-      'Show local image files in the conversation as a clickable thumbnail card for the user. Pass absolute paths (paths array, or path for one file); dir + limit instead shows the newest images in one directory. The pictures are not added to the model context and cost no tokens. Accepts PNG/JPEG/WebP/GIF/BMP/AVIF files.',
+      'Show local image files in the conversation as a clickable thumbnail card for the user. Pass absolute paths (paths array, or path for one file); dir + limit instead shows the newest images in one directory; recent: true repeats the pictures this conversation has already shown, newest first. The pictures are not added to the model context and cost no tokens. Accepts PNG/JPEG/WebP/GIF/BMP/AVIF files.',
     parameters: {
       type: 'object',
       properties: {
         paths: { type: 'array', items: { type: 'string' }, description: 'Absolute paths of the images to show, in order.' },
         path: { type: 'string', description: 'One absolute image path (shorthand for a single-item paths).' },
         dir: { type: 'string', description: 'Absolute directory to scan instead of listing paths; the newest images win.' },
-        limit: { type: 'integer', description: 'How many newest images to take from dir (default 12, max 24).' },
+        recent: { type: 'boolean', description: 'Show the pictures this conversation has already shown, newest first, instead of new files.' },
+        limit: { type: 'integer', description: 'How many newest images to take from dir or from recent (default 12, max 24).' },
         caption: { type: 'string', description: 'Optional one-line caption shown above the thumbnails.' },
       },
     },
@@ -344,6 +379,15 @@ function createTool(ctx) {
       const cwd = await sessionCwd(exec)
       const limit = Math.max(1, Math.min(MAX_IMAGES, Number(args?.limit) || 12))
       const skippedSeed = []
+      // One Agent is one conversation: `recent` reads back what this conversation
+      // already showed, newest first, and every successful show feeds the list.
+      const recentList = recentListFor(exec)
+      if (args?.recent === true) {
+        for (const entry of recentList.slice(-limit).reverse()) asked.push(entry.path)
+        if (asked.length === 0) {
+          return { images: [], skipped: [], caption: '', error: '这个会话还没有显示过图片' }
+        }
+      }
       if (typeof args?.dir === 'string' && args.dir.trim() !== '') {
         // The directory is resolved the same way a path is: against the Session
         // working directory, and refused when there is none to resolve against.
@@ -375,6 +419,9 @@ function createTool(ctx) {
       for (const raw of wanted.slice(MAX_IMAGES)) {
         skipped.push({ path: String(raw ?? '').trim(), reason: `超过单次 ${MAX_IMAGES} 张上限，未处理` })
       }
+      // Only pictures that really resolved are remembered: a missing file must not
+      // take a slot in `recent` and come back as a second failure later.
+      for (const image of images) rememberShown(recentList, image.path)
       return { images, skipped, caption: typeof args?.caption === 'string' ? args.caption.trim().slice(0, 200) : '' }
     },
   }

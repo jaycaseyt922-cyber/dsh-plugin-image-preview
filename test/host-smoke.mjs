@@ -69,6 +69,19 @@ results.wrongExtensionText = tool.output.render({}, results.wrongExtension)[0].t
 results.dir = await tool.execute({ dir: fixture.dir, limit: 3 })
 results.dirCount = results.dir.images.length
 
+// `recent` reads back what this conversation showed: per Agent, newest first.
+const conversationA = { id: 'smoke-a' }
+const conversationB = { id: 'smoke-b' }
+await tool.execute({ paths: [fixture.png] }, { agent: conversationA })
+await tool.execute({ paths: [fixture.subPng] }, { agent: conversationA })
+results.recentA = (await tool.execute({ recent: true }, { agent: conversationA })).images.map((entry) => entry.path)
+results.recentAOnlyTwo = (await tool.execute({ recent: true, limit: 1 }, { agent: conversationA })).images.length
+// Another conversation must not see A's pictures, and an empty one says so.
+const freshB = await tool.execute({ recent: true }, { agent: conversationB })
+results.recentB = { images: freshB.images.length, error: freshB.error }
+// Without an Agent the plugin keeps one process-wide list, never a crash.
+results.recentNoAgent = (await tool.execute({ recent: true })).images.length >= 1
+
 // --- the routes, driven with fake requests -----------------------------------
 const handler = routes.find((entry) => entry.path === '/image-preview')?.handler
 
@@ -289,6 +302,13 @@ if (results.save?.wroteFile !== true || results.save?.named !== true) failures.p
 if (results.save?.sameBytes !== true || results.save?.bytes !== pngBytes.length) failures.push('saveBytes')
 if (results.saveRejected !== 415) failures.push('saveRejectsNonPng')
 if (results.saveRefused !== 401) failures.push('saveFence')
+// `recent` is per conversation, newest first, and bounded.
+if (results.recentA?.length !== 2) failures.push('recentCount')
+if (results.recentA?.[0] !== fixture.subPng) failures.push('recentOrder')
+if (results.recentAOnlyTwo !== 1) failures.push('recentLimit')
+if (results.recentB?.images !== 0) failures.push('recentIsolation')
+if ((results.recentB?.error ?? '').includes('还没有显示过图片') !== true) failures.push('recentEmpty')
+if (results.recentNoAgent !== true) failures.push('recentNoAgent')
 if (results.reportTrusted !== 204) failures.push('reportTrusted')
 // The binary answer is the transport the page uses now.
 if (results.routePostBinary?.status !== 200) failures.push('postBinary')

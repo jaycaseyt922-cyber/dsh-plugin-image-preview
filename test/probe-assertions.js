@@ -199,6 +199,77 @@
     }
   }
 
+  // 8. 0.6：同一条消息里两张图 → A/B 并排 + 像素差异
+  const waitUntil = async (test, timeout = 9000) => {
+    const end = Date.now() + timeout
+    while (Date.now() < end) {
+      if (test()) return true
+      await sleep(200)
+    }
+    return false
+  }
+  const pairA = good
+  const pairB = 'C:/Users/18373/Documents/ans1.png'
+  const pairHost = document.createElement('div')
+  pairHost.id = 'ip-h5'
+  pairHost.style.cssText =
+    'position:fixed;left:60px;top:120px;z-index:99998;width:620px;background:#FBF7EF;color:#26241F;padding:10px 14px;border:1px solid #E2D9CA;border-radius:10px;font-size:14px;line-height:1.8'
+  for (const file of [pairA, pairB]) {
+    const paragraph = document.createElement('p')
+    paragraph.style.margin = '0'
+    paragraph.textContent = file
+    pairHost.append(paragraph)
+  }
+  document.body.append(pairHost)
+  await waitUntil(() => pairHost.querySelectorAll('.dsh-ip-figure').length >= 2, 12000)
+  const pairFigures = [...pairHost.querySelectorAll('.dsh-ip-figure')]
+  const firstPair = pairFigures[0]
+  if (firstPair !== undefined) {
+    firstPair.click()
+    await sleep(1500)
+    const metaText = (document.querySelector('.dsh-ipv-meta') ?? {}).textContent ?? ''
+    const compareBtn = [...document.querySelectorAll('.dsh-ipv-tools .dsh-ipv-btn')].find((b3) => b3.textContent === '对比')
+    const outCompare = { figures: pairFigures.length, meta: metaText, enabled: compareBtn !== undefined && compareBtn.disabled !== true }
+    if (compareBtn !== undefined) {
+      compareBtn.click()
+      const panelOpen = await waitUntil(() => document.querySelector('.dsh-ipv-compare') !== null, 4000)
+      outCompare.panel = panelOpen
+      const bothLoaded = await waitUntil(() => {
+        const imgs = [...document.querySelectorAll('.dsh-ipv-compare-pane img')]
+        return imgs.length === 2 && imgs.every((i) => i.naturalWidth > 0)
+      }, 12000)
+      outCompare.loaded = bothLoaded
+      const imgsNow = [...document.querySelectorAll('.dsh-ipv-compare-pane img')]
+      outCompare.sizes = imgsNow.map((i) => [i.naturalWidth, i.naturalHeight])
+      const diffBtn = [...document.querySelectorAll('.dsh-ipv-compare .dsh-ipv-inkbtn')].find((b3) => b3.textContent === '差异')
+      if (diffBtn !== undefined) {
+        diffBtn.click()
+        const hasDiff = await waitUntil(() => {
+          const canvas = document.querySelector('.dsh-ipv-compare-pane canvas')
+          return canvas !== null && canvas.width > 300 && canvas.getAttribute('aria-label') !== null
+        }, 6000)
+        const diffCanvas = document.querySelector('.dsh-ipv-compare-pane canvas')
+        outCompare.diff = diffCanvas === null || hasDiff !== true ? null : [diffCanvas.width, diffCanvas.height, diffCanvas.getAttribute('aria-label')]
+      }
+      document.querySelector('.dsh-ipv-root').dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))
+      const closedOnce = await waitUntil(() => document.querySelector('.dsh-ipv-compare') === null, 3000)
+      if (closedOnce !== true) {
+        // A synthetic key inside this long assertion chain can land while the layer
+        // is still being rebuilt; one retry keeps the assertion about the behaviour
+        // rather than about timer scheduling.
+        document.querySelector('.dsh-ipv-root').dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))
+      }
+      outCompare.closedFirstTry = closedOnce
+      outCompare.closed = await waitUntil(() => document.querySelector('.dsh-ipv-compare') === null, 3000)
+      document.querySelector('.dsh-ipv-root').dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))
+      await sleep(300)
+    }
+    out.compare = outCompare
+  } else {
+    out.compare = { figures: pairFigures.length, error: 'no figure rendered' }
+  }
+  pairHost.remove()
+
   for (const id of ['ip-h1', 'ip-h2', 'ip-h3', 'ip-h4']) document.getElementById(id)?.remove()
   return out
 })()
