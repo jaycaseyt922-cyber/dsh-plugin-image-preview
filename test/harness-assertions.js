@@ -1,5 +1,7 @@
 (async () => {
-  const wait = (ms = 90) => new Promise((r) => requestAnimationFrame(() => setTimeout(r, ms)))
+  // A plain timer, deliberately not `requestAnimationFrame`: rAF never fires in a
+  // hidden/occluded tab, and the whole run used to hang there instead of failing.
+  const wait = (ms = 90) => new Promise((r) => setTimeout(r, ms))
   await wait(300)
   const out = { applied: window.__applied, error: window.__error || null }
   const paths = (selector) => [...document.querySelectorAll(selector)].map((el) => el.dataset.ipPath)
@@ -283,8 +285,11 @@
     annotateComposer.remove()
   }
 
-  // 0.6: A/B comparison with a pixel diff.
+  // 0.6/0.8: comparison (side / overlay / diff) with the diff's own exits.
   if (firstFigure) {
+    // Defensive: a composer left behind by an earlier block would swallow the paste
+    // we are about to assert on (findComposer takes the first editor in the page).
+    for (const stray of document.querySelectorAll('[data-lexical-editor=true]')) stray.remove()
     firstFigure.click()
     await wait(500)
     const compareButton = [...document.querySelectorAll('.dsh-ipv-tools .dsh-ipv-btn')].find((b) => b.textContent === '对比')
@@ -296,7 +301,32 @@
       const compareImgs = [...document.querySelectorAll('.dsh-ipv-compare-pane img')]
       out.compare.panel = comparePanel !== null
       out.compare.imgs = compareImgs.length
-      out.compare.loaded = compareImgs.length === 2 && compareImgs.every((i) => i.naturalWidth > 0)
+      out.compare.loaded = compareImgs.length >= 2 && compareImgs.every((i) => i.naturalWidth > 0)
+
+      // 0.8 overlay: the two pictures layered, with a draggable split.
+      const overlayButton = [...document.querySelectorAll('.dsh-ipv-compare .dsh-ipv-inkbtn')].find((b) => b.textContent === '叠加')
+      if (overlayButton !== undefined) {
+        overlayButton.click()
+        await wait(500)
+        const overlayBox = document.querySelector('.dsh-ipv-compare-overlay')
+        const splitEl = document.querySelector('.dsh-ipv-compare-split')
+        const layered = [...document.querySelectorAll('.dsh-ipv-compare-overlay img')]
+        out.compare.overlay = {
+          pane: overlayBox !== null,
+          imgs: layered.map((i) => [i.naturalWidth, i.naturalHeight]),
+          splitBefore: splitEl === null ? null : splitEl.style.left,
+        }
+        if (overlayBox !== null) {
+          const overlayRect = overlayBox.getBoundingClientRect()
+          const common = { bubbles: true, cancelable: true, clientX: overlayRect.left + overlayRect.width * 0.25, clientY: overlayRect.top + 12, button: 0, pointerId: 41 }
+          overlayBox.dispatchEvent(new PointerEvent('pointerdown', common))
+          overlayBox.dispatchEvent(new PointerEvent('pointerup', common))
+          await wait(150)
+          out.compare.overlay.splitAfter = splitEl === null ? null : splitEl.style.left
+          out.compare.overlay.clipAfter = layered[1] === undefined ? null : layered[1].style.clipPath
+        }
+      }
+
       const diffButton = [...document.querySelectorAll('.dsh-ipv-compare .dsh-ipv-inkbtn')].find((b) => b.textContent === '差异')
       if (diffButton !== undefined) {
         diffButton.click()
@@ -305,6 +335,35 @@
         out.compare.diff = diffCanvas === null
           ? null
           : { size: [diffCanvas.width, diffCanvas.height], label: diffCanvas.getAttribute('aria-label') }
+
+        // The diff is a picture too: it must go to the composer like any other.
+        const diffComposer = document.createElement('div')
+        diffComposer.setAttribute('data-lexical-editor', 'true')
+        diffComposer.contentEditable = 'true'
+        diffComposer.style.cssText = 'position:fixed;left:8px;bottom:96px;width:200px;height:30px;border:1px solid #ccc'
+        let diffPasted = null
+        diffComposer.addEventListener('paste', (event) => {
+          event.preventDefault()
+          const file = event.clipboardData === null ? null : event.clipboardData.files[0]
+          diffPasted = { name: file ? file.name : '', text: event.clipboardData === null ? '' : event.clipboardData.getData('text/plain') }
+          const tile = document.createElement('img')
+          tile.alt = diffPasted.name
+          tile.dataset.testTile = '1'
+          document.body.append(tile)
+        })
+        document.body.append(diffComposer)
+        const sendDiffButton = [...document.querySelectorAll('.dsh-ipv-compare .dsh-ipv-inkbtn')].find((b) => b.textContent === '发送差异')
+        if (sendDiffButton !== undefined) {
+          sendDiffButton.click()
+          await wait(900)
+          out.compare.diffSent = {
+            pasted: diffPasted,
+            tile: document.querySelector('img[data-test-tile="1"]') !== null,
+            toast: (document.querySelector('.dsh-ipv-status') ?? {}).textContent ?? null,
+          }
+        }
+        for (const node of document.querySelectorAll('img[data-test-tile="1"]')) node.remove()
+        diffComposer.remove()
       }
       const swapButton = [...document.querySelectorAll('.dsh-ipv-compare .dsh-ipv-inkbtn')].find((b) => b.textContent === '交换')
       const beforeSwap = document.querySelector('.dsh-ipv-compare-name').textContent

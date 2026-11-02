@@ -137,9 +137,13 @@ window.__ModuleLoader__.load({
         compare: '对比',
         compareTitle: '和同一组里的另一张图对比（D）',
         compareSide: '并排',
+        compareOverlay: '叠加',
         compareDiff: '差异',
         compareSwap: '交换',
         compareClose: '关闭对比',
+        compareSendDiff: '发送差异',
+        compareSaveDiff: '保存差异',
+        compareDiffEmpty: '先算差异再发',
         compareOnlyOne: '这组里只有一张图，没得比',
         compareHint: '两张都加载好才能算差异',
         compareLoading: '加载中…',
@@ -623,6 +627,43 @@ window.__ModuleLoader__.load({
   margin: auto;
   font-size: 12px;
   opacity: 0.7;
+}
+.dsh-ipv-compare-overlay {
+  position: relative;
+  width: 100%;
+  height: 100%;
+  overflow: hidden;
+  background: #000;
+}
+.dsh-ipv-compare-overlay img {
+  position: absolute;
+  inset: 0;
+  margin: auto;
+  max-width: 100%;
+  max-height: 100%;
+  object-fit: contain;
+}
+.dsh-ipv-compare-split {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 2px;
+  margin-left: -1px;
+  background: #fff;
+  cursor: ew-resize;
+  touch-action: none;
+}
+.dsh-ipv-compare-split::after {
+  content: "";
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  width: 18px;
+  height: 18px;
+  margin: -9px 0 0 -9px;
+  border-radius: 50%;
+  background: #fff;
+  opacity: 0.9;
 }
 .dsh-ipv-status {
   position: absolute;
@@ -1463,6 +1504,15 @@ window.__ModuleLoader__.load({
       let comparePickerEl = null
       let compareButton = null
       let compareChanged = 0
+      /** Overlay mode: the two layered pictures, the split line, and its state. */
+      let comparePanes = null
+      let compareOverlayA = null
+      let compareOverlayB = null
+      let compareSplitEl = null
+      let compareSplit = 0.5
+      let compareSplitDrag = false
+      let compareDiffActions = []
+      let compareDiffReady = false
 
       /** Clamp the scale to the viewer's bounds. */
       const clamp = (value) => Math.min(MAX_SCALE, Math.max(MIN_SCALE, value))
@@ -2755,25 +2805,29 @@ window.__ModuleLoader__.load({
       }
 
       /** Ask the host to write the PNG to its temp directory and say where. */
+      /** Write one PNG through the host's write route and say where it landed. */
+      async function saveBlob(blob) {
+        const response = await fetch(new URL('image-preview/save', document.baseURI).href, {
+          method: 'POST',
+          credentials: 'same-origin',
+          headers: { 'content-type': 'image/png' },
+          body: blob,
+        })
+        const report = await response.json().catch(() => null)
+        if (response.ok !== true || report === null || typeof report.path !== 'string') {
+          const reason = report !== null && typeof report.error === 'string' ? report.error : 'HTTP ' + response.status
+          throw new Error(reason)
+        }
+        announce(TEXT.saved.replace('{path}', report.path))
+      }
+
       async function saveAnnotated() {
         if (isDirty() === false) {
           announce(TEXT.nothingToSend)
           return
         }
         try {
-          const blob = await exportAnnotated()
-          const response = await fetch(new URL('image-preview/save', document.baseURI).href, {
-            method: 'POST',
-            credentials: 'same-origin',
-            headers: { 'content-type': 'image/png' },
-            body: blob,
-          })
-          const report = await response.json().catch(() => null)
-          if (response.ok !== true || report === null || typeof report.path !== 'string') {
-            const reason = report !== null && typeof report.error === 'string' ? report.error : 'HTTP ' + response.status
-            throw new Error(reason)
-          }
-          announce(TEXT.saved.replace('{path}', report.path))
+          await saveBlob(await exportAnnotated())
         } catch (error) {
           announce(TEXT.saveFailed.replace('{reason}', String((error instanceof Error ? error.message : error) || '?')))
         }
@@ -2917,10 +2971,20 @@ window.__ModuleLoader__.load({
           compareTitleEl,
           comparePickerEl,
           button(TEXT.compareSide, () => setCompareMode('side')),
+          button(TEXT.compareOverlay, () => setCompareMode('overlay')),
           button(TEXT.compareDiff, () => setCompareMode('diff')),
           button(TEXT.compareSwap, swapCompare),
-          button(TEXT.compareClose, closeCompare),
         )
+        const diffSendButton = button(TEXT.compareSendDiff, () => {
+          sendCompareDiff().catch(() => {})
+        })
+        const diffSaveButton = button(TEXT.compareSaveDiff, () => {
+          saveCompareDiff().catch(() => {})
+        })
+        diffSendButton.style.display = 'none'
+        diffSaveButton.style.display = 'none'
+        compareDiffActions = [diffSendButton, diffSaveButton]
+        bar.append(diffSendButton, diffSaveButton, button(TEXT.compareClose, closeCompare))
         const body = document.createElement('div')
         body.className = 'dsh-ipv-compare-body'
         const paneOf = () => {
@@ -2931,7 +2995,9 @@ window.__ModuleLoader__.load({
         }
         const paneA = paneOf()
         const paneB = paneOf()
+        const paneOverlay = paneOf()
         const paneDiff = paneOf()
+        paneOverlay.style.display = 'none'
         paneDiff.style.display = 'none'
         compareImgA = document.createElement('img')
         compareImgB = document.createElement('img')
@@ -2939,10 +3005,68 @@ window.__ModuleLoader__.load({
         paneA.append(compareImgA)
         paneB.append(compareImgB)
         paneDiff.append(compareCanvas)
+
+        // Overlay: A underneath, B on top clipped from the split rightwards.
+        const overlayBox = document.createElement('div')
+        overlayBox.className = 'dsh-ipv-compare-overlay'
+        compareOverlayA = document.createElement('img')
+        compareOverlayB = document.createElement('img')
+        compareSplitEl = document.createElement('div')
+        compareSplitEl.className = 'dsh-ipv-compare-split'
+        compareSplitEl.setAttribute('role', 'separator')
+        compareSplitEl.setAttribute('aria-label', 'A/B 分割线')
+        overlayBox.append(compareOverlayA, compareOverlayB, compareSplitEl)
+        paneOverlay.append(overlayBox)
+        comparePanes = { sideA: paneA, sideB: paneB, overlay: paneOverlay, diff: paneDiff }
+
+        /** Move the split to one viewport x. */
+        const setSplit = (clientX) => {
+          const rect = overlayBox.getBoundingClientRect()
+          if (rect.width <= 0) return
+          compareSplit = Math.max(0.02, Math.min(0.98, (clientX - rect.left) / rect.width))
+          paintCompareSplit()
+        }
+        overlayBox.addEventListener('pointerdown', (event) => {
+          if (event.button !== 0) return
+          event.preventDefault()
+          event.stopPropagation()
+          compareSplitDrag = true
+          setSplit(event.clientX)
+          try {
+            overlayBox.setPointerCapture(event.pointerId)
+          } catch {
+            /* the pointer is already gone */
+          }
+        })
+        overlayBox.addEventListener('pointermove', (event) => {
+          if (compareSplitDrag !== true) return
+          event.preventDefault()
+          setSplit(event.clientX)
+        })
+        const endSplitDrag = (event) => {
+          compareSplitDrag = false
+          try {
+            overlayBox.releasePointerCapture(event.pointerId)
+          } catch {
+            /* the pointer is already gone */
+          }
+        }
+        overlayBox.addEventListener('pointerup', endSplitDrag)
+        overlayBox.addEventListener('pointercancel', endSplitDrag)
+
         compareEl.append(bar, body)
         stage.append(compareEl)
         fillComparePicker()
+        paintCompareSplit()
         loadCompare()
+      }
+
+      /** Paint the split line and clip B to the right of it. */
+      function paintCompareSplit() {
+        if (compareSplitEl === null) return
+        const percent = (compareSplit * 100).toFixed(2) + '%'
+        compareSplitEl.style.left = percent
+        if (compareOverlayB !== null) compareOverlayB.style.clipPath = 'inset(0 0 0 ' + percent + ')'
       }
 
       /** Refresh the picker and the A label after a swap or a new picture set. */
@@ -2970,6 +3094,13 @@ window.__ModuleLoader__.load({
         compareCanvas = null
         compareTitleEl = null
         comparePickerEl = null
+        comparePanes = null
+        compareOverlayA = null
+        compareOverlayB = null
+        compareSplitEl = null
+        compareSplitDrag = false
+        compareDiffActions = []
+        compareDiffReady = false
       }
 
       /** Swap which picture is A and which is B. */
@@ -2982,27 +3113,83 @@ window.__ModuleLoader__.load({
         loadCompare()
       }
 
-      /** Side-by-side or pixel diff. */
+      /** Side-by-side, overlay or pixel diff. */
       function setCompareMode(mode) {
+        if (mode !== 'side' && mode !== 'overlay' && mode !== 'diff') return
         compareMode = mode
-        if (compareEl === null) return
-        const panes = compareEl.querySelectorAll('.dsh-ipv-compare-pane')
-        if (panes.length < 3) return
-        panes[0].style.display = mode === 'side' ? 'flex' : 'none'
-        panes[1].style.display = mode === 'side' ? 'flex' : 'none'
-        panes[2].style.display = mode === 'diff' ? 'flex' : 'none'
+        if (compareEl === null || comparePanes === null) return
+        comparePanes.sideA.style.display = mode === 'side' ? 'flex' : 'none'
+        comparePanes.sideB.style.display = mode === 'side' ? 'flex' : 'none'
+        comparePanes.overlay.style.display = mode === 'overlay' ? 'flex' : 'none'
+        comparePanes.diff.style.display = mode === 'diff' ? 'flex' : 'none'
+        for (const element of compareDiffActions) element.style.display = mode === 'diff' ? '' : 'none'
         if (mode === 'diff') renderCompareDiff()
+        if (mode === 'overlay') paintCompareSplit()
       }
 
       /** Load both sides from the same candidate chain the viewer uses. */
       async function loadCompare() {
         if (compareImgA === null || compareImgB === null) return
         compareChanged = 0
-        compareImgA.alt = baseName(paths[compareA] ?? '')
-        compareImgB.alt = baseName(paths[compareB] ?? '')
+        compareDiffReady = false
+        const nameA = baseName(paths[compareA] ?? '')
+        const nameB = baseName(paths[compareB] ?? '')
+        compareImgA.alt = nameA
+        compareImgB.alt = nameB
+        if (compareOverlayA !== null) compareOverlayA.alt = nameA
+        if (compareOverlayB !== null) compareOverlayB.alt = nameB
         await loadInto(compareImgA, paths[compareA] ?? '')
         await loadInto(compareImgB, paths[compareB] ?? '')
+        if (compareOverlayA !== null) await loadInto(compareOverlayA, paths[compareA] ?? '')
+        if (compareOverlayB !== null) await loadInto(compareOverlayB, paths[compareB] ?? '')
+        paintCompareSplit()
         if (compareMode === 'diff') renderCompareDiff()
+      }
+
+      /** The diff canvas as a PNG blob; null while there is no computed diff. */
+      function compareDiffBlob() {
+        if (compareDiffReady !== true || compareCanvas === null) return Promise.resolve(null)
+        return new Promise((resolve) => {
+          compareCanvas.toBlob((blob) => resolve(blob), 'image/png')
+        })
+      }
+
+      /** Send the diff picture with the current instruction. */
+      async function sendCompareDiff() {
+        try {
+          const blob = await compareDiffBlob()
+          if (blob === null) {
+            announce(TEXT.compareDiffEmpty)
+            return
+          }
+          const name = fileStamp(Date.now())
+          const before = attachmentCount()
+          const editor = findComposer(root)
+          if (editor === null) {
+            await copyToClipboard(blob)
+            announce(TEXT.fallback)
+            return
+          }
+          const claimed = pasteImageWithText(editor, blob, name, instructionText())
+          await new Promise((resolve) => setTimeout(resolve, 320))
+          announce(claimed === true && attachmentLanded(name, before) === true ? TEXT.sent : TEXT.fallback)
+        } catch (error) {
+          announce(String((error instanceof Error ? error.message : error) || TEXT.failed))
+        }
+      }
+
+      /** Save the diff picture through the host's write route. */
+      async function saveCompareDiff() {
+        try {
+          const blob = await compareDiffBlob()
+          if (blob === null) {
+            announce(TEXT.compareDiffEmpty)
+            return
+          }
+          await saveBlob(blob)
+        } catch (error) {
+          announce(TEXT.saveFailed.replace('{reason}', String((error instanceof Error ? error.message : error) || '?')))
+        }
       }
 
       /** Point one pane's image at a path, trying each candidate URL in turn. */
@@ -3085,6 +3272,7 @@ window.__ModuleLoader__.load({
         }
         out.putImageData(diff, 0, 0)
         compareChanged = changed
+        compareDiffReady = true
         compareCanvas.title = '差异像素 ' + changed + ' 个（阈值 24）'
         compareCanvas.setAttribute('aria-label', '差异像素 ' + changed + ' 个')
       }
