@@ -390,6 +390,38 @@
     }
   }
 
+  // 0.8 preferences: the panel shows the live values and persists a change.
+  if (firstFigure) {
+    firstFigure.click()
+    await wait(500)
+    const gear = [...document.querySelectorAll('.dsh-ipv-tools .dsh-ipv-btn')].find((b) => b.textContent === '⚙')
+    out.prefs = { button: gear !== undefined }
+    if (gear !== undefined) {
+      gear.click()
+      await wait(150)
+      const panel = document.querySelector('.dsh-ipv-prefs')
+      out.prefs.panel = panel !== null
+      out.prefs.rows = panel === null ? 0 : panel.querySelectorAll('.dsh-ipv-prefs-row').length
+      out.prefs.swatches = panel === null ? 0 : panel.querySelectorAll('[data-pref-color]').length
+      const provenance = panel === null ? null : panel.querySelector('input[data-pref-flag=provenance]')
+      if (provenance !== null) {
+        const before = provenance.checked
+        provenance.click()
+        await wait(100)
+        out.prefs.persisted = (localStorage.getItem('dsh-image-preview:prefs') ?? '').includes('"provenance":')
+        out.prefs.toggled = provenance.checked !== before
+        provenance.click()
+        await wait(60)
+      }
+      const done = panel === null ? null : [...panel.querySelectorAll('.dsh-ipv-inkbtn')].find((b) => b.textContent === '完成')
+      if (done !== null) done.click()
+      await wait(80)
+      out.prefs.hiddenAfterDone = panel !== null && getComputedStyle(panel).display === 'none'
+      document.querySelector('.dsh-ipv-root').dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))
+      await wait(150)
+    }
+  }
+
   window.__result = out
   return 'ok'
 })()

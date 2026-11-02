@@ -159,6 +159,16 @@ window.__ModuleLoader__.load({
         formatPng: 'PNG',
         formatJpeg: 'JPG',
         formatTitle: '导出格式（PNG 无损 / JPG 体积小，写作/分享常用 JPG）',
+        prefsTitle: '偏好设置',
+        prefsColor: '默认颜色',
+        prefsWidth: '默认线宽',
+        prefsCompare: '对比默认',
+        prefsCloseAfterSend: '发送后关闭查看器',
+        prefsProvenance: '指令里附「来源」行',
+        prefsAutoSend: '粘贴后自动发送（危险，默认关）',
+        prefsReset: '恢复默认',
+        prefsDone: '完成',
+        prefsNote: '只存本机（localStorage），不写 profile。',
       },
     }
     /** The table the viewer reads; `COPY.en` lands with the locale hook. */
@@ -167,7 +177,16 @@ window.__ModuleLoader__.load({
     /** Where this machine keeps the viewer's own preferences (not the profile). */
     const PREFS_KEY = 'dsh-image-preview:prefs'
     /** Defaults; every key is optional on disk and merged over these. */
-    const PREFS_DEFAULTS = { format: 'png', quality: 0.85 }
+    const PREFS_DEFAULTS = {
+      format: 'png',
+      quality: 0.85,
+      color: '#ff2d2d',
+      width: 4,
+      compareMode: 'side',
+      closeAfterSend: true,
+      provenance: true,
+      autoSend: false,
+    }
 
     /** Read the local preferences, merging whatever is on disk over the defaults. */
     function loadPrefs() {
@@ -179,6 +198,12 @@ window.__ModuleLoader__.load({
         if (parsed === null || typeof parsed !== 'object') return out
         if (parsed.format === 'png' || parsed.format === 'jpeg') out.format = parsed.format
         if (typeof parsed.quality === 'number' && parsed.quality >= 0.3 && parsed.quality <= 1) out.quality = parsed.quality
+        if (typeof parsed.color === 'string' && /^#[0-9a-f]{6}$/iu.test(parsed.color)) out.color = parsed.color
+        if (typeof parsed.width === 'number' && WIDTHS.includes(parsed.width)) out.width = parsed.width
+        if (parsed.compareMode === 'side' || parsed.compareMode === 'overlay' || parsed.compareMode === 'diff') out.compareMode = parsed.compareMode
+        for (const flag of ['closeAfterSend', 'provenance', 'autoSend']) {
+          if (typeof parsed[flag] === 'boolean') out[flag] = parsed[flag]
+        }
       } catch {
         /* no storage, or a corrupt value: defaults win */
       }
@@ -606,6 +631,62 @@ window.__ModuleLoader__.load({
   display: flex;
   gap: 8px;
   justify-content: flex-end;
+}
+.dsh-ipv-prefs {
+  position: absolute;
+  inset: 0;
+  z-index: 4;
+  display: none;
+  align-items: center;
+  justify-content: center;
+  background: rgba(0, 0, 0, 0.5);
+}
+.dsh-ipv-prefs-card {
+  width: min(420px, calc(100% - 32px));
+  padding: 16px 18px;
+  border-radius: 10px;
+  background: rgba(24, 26, 32, 0.97);
+  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.5);
+  font-size: 12px;
+}
+.dsh-ipv-prefs-title {
+  margin-bottom: 10px;
+  font-size: 13px;
+  font-weight: 600;
+}
+.dsh-ipv-prefs-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  padding: 5px 0;
+}
+.dsh-ipv-prefs-label {
+  min-width: 72px;
+  opacity: 0.7;
+}
+.dsh-ipv-prefs-controls {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+}
+.dsh-ipv-prefs-check {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  cursor: pointer;
+}
+.dsh-ipv-prefs-note {
+  margin-top: 8px;
+  font-size: 11px;
+  opacity: 0.55;
+}
+.dsh-ipv-prefs-footer {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 12px;
 }
 .dsh-ipv-compare {
   position: absolute;
@@ -1565,6 +1646,9 @@ window.__ModuleLoader__.load({
       let compareSplitDrag = false
       let compareDiffActions = []
       let compareDiffReady = false
+      /** The preferences panel and its launcher. */
+      let prefsPanel = null
+      let prefsButton = null
 
       /** Clamp the scale to the viewer's bounds. */
       const clamp = (value) => Math.min(MAX_SCALE, Math.max(MIN_SCALE, value))
@@ -1806,6 +1890,9 @@ window.__ModuleLoader__.load({
         if (paths.length === 0) return
         bust = 0
         natural = { width: 0, height: 0 }
+        // Preferences are per machine and per open: the annotator starts from them.
+        setStrokeColor(COLORS.includes(prefs.color) ? prefs.color : COLORS[0])
+        setStrokeWidth(WIDTHS.includes(prefs.width) ? prefs.width : WIDTHS[1])
         // A fresh open never inherits a box or annotations from the last one.
         resetInk()
         setSelecting(false)
@@ -2651,7 +2738,7 @@ window.__ModuleLoader__.load({
         const file = paths[index] ?? ''
         // The region an export keeps: the annotator's crop, else the quick selection.
         const box = crop ?? (selecting === true ? selection : null)
-        if (file !== '' && box !== null) {
+        if (prefs.provenance !== false && file !== '' && box !== null) {
           lines.push(TEXT.source
             .replace('{path}', file)
             .replace('{x}', String(Math.round(box.x)))
@@ -2660,6 +2747,16 @@ window.__ModuleLoader__.load({
             .replace('{h}', String(Math.round(box.h))))
         }
         return lines.join('\n')
+      }
+
+      /** Submit the draft when the reader asked for one-paste-and-send. */
+      function maybeAutoSend(editor) {
+        if (prefs.autoSend !== true) return
+        try {
+          editor.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }))
+        } catch {
+          /* the composer owns its keys; a miss is not a viewer failure */
+        }
       }
 
       /** Main exit: cut the selection, hand it to the composer, and get out of the way. */
@@ -2681,7 +2778,8 @@ window.__ModuleLoader__.load({
           await new Promise((resolve) => setTimeout(resolve, 320))
           if (claimed === true && attachmentLanded(name, before) === true) {
             announce(TEXT.sent)
-            close(false)
+            maybeAutoSend(editor)
+            if (prefs.closeAfterSend !== false) close(false)
             return
           }
           await copyToClipboard(blob)
@@ -2831,8 +2929,9 @@ window.__ModuleLoader__.load({
           await new Promise((resolve) => setTimeout(resolve, 320))
           if (claimed === true && attachmentLanded(name, before) === true) {
             announce(TEXT.sent)
+            maybeAutoSend(editor)
             resetInk()
-            close(false)
+            if (prefs.closeAfterSend !== false) close(false)
             return
           }
           await copyToClipboard(blob)
@@ -2991,7 +3090,7 @@ window.__ModuleLoader__.load({
         comparing = true
         compareA = index
         compareB = index + 1 < paths.length ? index + 1 : index - 1
-        compareMode = 'side'
+        compareMode = prefs.compareMode === 'overlay' || prefs.compareMode === 'diff' ? prefs.compareMode : 'side'
         compareChanged = 0
         compareEl = document.createElement('div')
         compareEl.className = 'dsh-ipv-compare'
@@ -3112,6 +3211,8 @@ window.__ModuleLoader__.load({
         stage.append(compareEl)
         fillComparePicker()
         paintCompareSplit()
+        // Start in the mode the preferences ask for (side by default).
+        setCompareMode(compareMode)
         loadCompare()
       }
 
@@ -3164,6 +3265,8 @@ window.__ModuleLoader__.load({
         compareA = compareB
         compareB = previous
         fillComparePicker()
+        paintCompareSplit()
+        setCompareMode(compareMode)
         loadCompare()
       }
 
@@ -3331,6 +3434,146 @@ window.__ModuleLoader__.load({
         compareCanvas.setAttribute('aria-label', '差异像素 ' + changed + ' 个')
       }
 
+      // ------------------------------ preferences ------------------------------
+
+      /** Open or close the per-machine preferences panel. */
+      function togglePrefs() {
+        if (prefsPanel === null) buildPrefsPanel()
+        if (prefsPanel === null) return
+        prefsPanel.style.display = prefsPanel.style.display === 'flex' ? 'none' : 'flex'
+        if (prefsPanel.style.display === 'flex') syncPrefsPanel()
+      }
+
+      /** Rebuild every control from the live preferences. */
+      function syncPrefsPanel() {
+        if (prefsPanel === null) return
+        for (const element of prefsPanel.querySelectorAll('[data-pref-color]')) {
+          element.setAttribute('aria-pressed', element.dataset.prefColor === prefs.color ? 'true' : 'false')
+        }
+        for (const element of prefsPanel.querySelectorAll('[data-pref-width]')) {
+          element.setAttribute('aria-pressed', String(element.dataset.prefWidth) === String(prefs.width) ? 'true' : 'false')
+        }
+        for (const element of prefsPanel.querySelectorAll('[data-pref-mode]')) {
+          element.setAttribute('aria-pressed', element.dataset.prefMode === prefs.compareMode ? 'true' : 'false')
+        }
+        for (const element of prefsPanel.querySelectorAll('[data-pref-format]')) {
+          element.setAttribute('aria-pressed', String(element.dataset.prefFormat === 'jpeg') === String(prefs.format === 'jpeg') ? 'true' : 'false')
+        }
+        for (const element of prefsPanel.querySelectorAll('[data-pref-flag]')) {
+          element.checked = prefs[element.dataset.prefFlag] === true
+        }
+      }
+
+      /** Persist and apply one preference change. */
+      function setPref(key, value) {
+        prefs = { ...prefs, [key]: value }
+        savePrefs(prefs)
+        if (key === 'color') setStrokeColor(prefs.color)
+        if (key === 'width') setStrokeWidth(prefs.width)
+        syncPrefsPanel()
+      }
+
+      /** Build the panel once, lazily. */
+      function buildPrefsPanel() {
+        if (root === null) return
+        const layer = document.createElement('div')
+        layer.className = 'dsh-ipv-prefs'
+        layer.setAttribute('role', 'dialog')
+        layer.setAttribute('aria-label', TEXT.prefsTitle)
+        const card = document.createElement('div')
+        card.className = 'dsh-ipv-prefs-card'
+        const title = document.createElement('div')
+        title.className = 'dsh-ipv-prefs-title'
+        title.textContent = TEXT.prefsTitle
+        const row = (label, controls) => {
+          const line = document.createElement('div')
+          line.className = 'dsh-ipv-prefs-row'
+          const name = document.createElement('span')
+          name.className = 'dsh-ipv-prefs-label'
+          name.textContent = label
+          const box = document.createElement('span')
+          box.className = 'dsh-ipv-prefs-controls'
+          box.append(...controls)
+          line.append(name, box)
+          card.append(line)
+          return line
+        }
+        const chip = (className, label, hint, onClick) => {
+          const element = document.createElement('button')
+          element.type = 'button'
+          element.className = className
+          element.textContent = label
+          element.title = hint
+          element.setAttribute('aria-label', hint)
+          element.addEventListener('click', (event) => {
+            event.preventDefault()
+            event.stopPropagation()
+            onClick()
+          })
+          return element
+        }
+        row(TEXT.prefsColor, COLORS.map((value) => {
+          const element = chip('dsh-ipv-swatch', '', value, () => setPref('color', value))
+          element.dataset.prefColor = value
+          element.style.background = value
+          return element
+        }))
+        row(TEXT.prefsWidth, WIDTHS.map((value) => {
+          const element = chip('dsh-ipv-width', String(value), String(value) + ' px', () => setPref('width', value))
+          element.dataset.prefWidth = String(value)
+          element.style.setProperty('--w', String(value))
+          return element
+        }))
+        row(TEXT.prefsCompare, [['side', TEXT.compareSide], ['overlay', TEXT.compareOverlay], ['diff', TEXT.compareDiff]].map(([id, label]) => {
+          const element = chip('dsh-ipv-inkbtn', label, label, () => setPref('compareMode', id))
+          element.dataset.prefMode = id
+          return element
+        }))
+        const flagRow = (key, label) => {
+          const id = 'dsh-ipv-pref-' + key
+          const input = document.createElement('input')
+          input.type = 'checkbox'
+          input.id = id
+          input.dataset.prefFlag = key
+          input.addEventListener('change', () => setPref(key, input.checked === true))
+          const wrap = document.createElement('label')
+          wrap.className = 'dsh-ipv-prefs-check'
+          wrap.htmlFor = id
+          wrap.append(input, document.createTextNode(label))
+          row('', [wrap])
+        }
+        flagRow('closeAfterSend', TEXT.prefsCloseAfterSend)
+        flagRow('provenance', TEXT.prefsProvenance)
+        flagRow('autoSend', TEXT.prefsAutoSend)
+        row(TEXT.format, [['png', 'PNG'], ['jpeg', 'JPG']].map(([id, label]) => {
+          const element = chip('dsh-ipv-inkbtn', label, label, () => setPref('format', id))
+          element.dataset.prefFormat = id
+          return element
+        }))
+        const note = document.createElement('div')
+        note.className = 'dsh-ipv-prefs-note'
+        note.textContent = TEXT.prefsNote
+        const footer = document.createElement('div')
+        footer.className = 'dsh-ipv-prefs-footer'
+        footer.append(
+          chip('dsh-ipv-inkbtn', TEXT.prefsReset, TEXT.prefsReset, () => {
+            prefs = { ...PREFS_DEFAULTS }
+            savePrefs(prefs)
+            setStrokeColor(prefs.color)
+            setStrokeWidth(prefs.width)
+            syncPrefsPanel()
+          }),
+          chip('dsh-ipv-inkbtn dsh-ipv-inkbtn-primary', TEXT.prefsDone, TEXT.prefsDone, () => {
+            if (prefsPanel !== null) prefsPanel.style.display = 'none'
+          }),
+        )
+        card.append(title, note, footer)
+        layer.append(card)
+        root.append(layer)
+        prefsPanel = layer
+        syncPrefsPanel()
+      }
+
       /** Create the overlay DOM on first use. */
       function ensure() {
         if (root !== null) return
@@ -3415,6 +3658,7 @@ window.__ModuleLoader__.load({
         annotateButton = button(TEXT.annotate, TEXT.annotateTitle, toggleInking)
         annotateButton.setAttribute('aria-pressed', 'false')
         compareButton = button(TEXT.compare, TEXT.compareTitle, toggleCompare)
+        prefsButton = button('⚙', TEXT.prefsTitle, togglePrefs)
         button('关闭', '关闭（Esc）', () => close())
 
         const stageElement = document.createElement('div')

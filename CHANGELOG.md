@@ -54,6 +54,13 @@ Internal milestones (never published, never numbered as releases):
 - In diff mode: 「发送差异」 hands the diff PNG to the composer, 「保存差异」 writes it
   through the host save route.
 
+**Preferences**
+- 偏好设置 (`⚙`): default colour and stroke width, the default comparison mode, and
+  three switches — close the viewer after a successful send, attach the provenance
+  line, and auto-submit the draft after the paste. Stored per machine in
+  `localStorage` (`dsh-image-preview:prefs`), never written to the profile; 恢复默认
+  resets every value. Harness covers the panel, a persisted toggle and the close.
+
 **Conversation picture index**
 - `preview_image({ recent: true })`: list the pictures this conversation has already
   shown, newest first (with the usual `limit`, max 24). The list is per Agent — one
