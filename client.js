@@ -1777,13 +1777,62 @@ window.__ModuleLoader__.load({
       /** Clamp the scale to the viewer's bounds. */
       const clamp = (value) => Math.min(MAX_SCALE, Math.max(MIN_SCALE, value))
 
+      /**
+       * The stage rectangle, cached until something actually reflows it.
+       *
+       * Reading it inside `paint()` right after writing the picture's transform
+       * forced a synchronous layout on every pointer move. The cache is dropped when
+       * the bars appear/disappear, on resize, and on open — the only things that
+       * change the stage's box.
+       */
+      let stageBox = null
+      let stageBoxDirty = true
+      /** Mark the cached stage box stale. */
+      function markStageDirty() {
+        stageBoxDirty = true
+      }
+      /** Read (and cache) the stage rectangle. */
+      function stageRect() {
+        if (stageBoxDirty === true || stageBox === null) {
+          stageBox = stage === null ? { left: 0, top: 0, width: 0, height: 0 } : stage.getBoundingClientRect()
+          stageBoxDirty = false
+        }
+        return stageBox
+      }
+
+      /** One pending frame, so a 240 Hz mouse cannot repaint four times a frame. */
+      let paintFrame = 0
+      let paintTimer = 0
+      /** Coalesce a repaint into the next frame, with a timer fallback for hidden windows. */
+      function schedulePaint() {
+        if (paintFrame !== 0 || paintTimer !== 0) return
+        const run = () => {
+          if (paintFrame !== 0 && typeof cancelAnimationFrame === 'function') cancelAnimationFrame(paintFrame)
+          paintFrame = 0
+          if (paintTimer !== 0) {
+            clearTimeout(paintTimer)
+            paintTimer = 0
+          }
+          paint()
+        }
+        if (typeof requestAnimationFrame === 'function') paintFrame = requestAnimationFrame(run)
+        paintTimer = setTimeout(run, 34)
+      }
+
       /** Paint the current transform and the readouts. */
       function paint() {
         if (image === null) return
-        image.style.transform =
+        // Read layout BEFORE writing the transform, so the two never interleave.
+        stageRect()
+        const transform =
           'translate(-50%, -50%) translate(' + offsetX.toFixed(1) + 'px, ' + offsetY.toFixed(1) + 'px) scale(' + scale.toFixed(4) + ')'
-        image.dataset.pixel = scale >= 3 ? '1' : '0'
-        if (zoomLabel !== null) zoomLabel.textContent = Math.round(scale * 100) + '%'
+        if (image.style.transform !== transform) image.style.transform = transform
+        const pixel = scale >= 3 ? '1' : '0'
+        if (image.dataset.pixel !== pixel) image.dataset.pixel = pixel
+        if (zoomLabel !== null) {
+          const percent = Math.round(scale * 100) + '%'
+          if (zoomLabel.textContent !== percent) zoomLabel.textContent = percent
+        }
         // Same frame as the picture: a selection painted a frame later visibly
         // slides against the image during a fast pan.
         inkPaint()
@@ -1792,7 +1841,7 @@ window.__ModuleLoader__.load({
       /** Fit the picture inside the stage, centred. */
       function fit() {
         if (image === null || natural.width <= 0 || natural.height <= 0) return
-        const box = stage.getBoundingClientRect()
+        const box = stageRect()
         const room = { width: Math.max(80, box.width - 32), height: Math.max(80, box.height - 32) }
         scale = clamp(Math.min(room.width / natural.width, room.height / natural.height, 1))
         offsetX = 0
@@ -2024,7 +2073,10 @@ window.__ModuleLoader__.load({
         closeCompare()
         if (compareButton !== null) compareButton.disabled = paths.length < 2
         if (resizeHandler === null) {
-          resizeHandler = () => paint()
+          resizeHandler = () => {
+          markStageDirty()
+          paint()
+        }
           window.addEventListener('resize', resizeHandler)
         }
         if (!root.isConnected) document.body.appendChild(root)
@@ -2036,6 +2088,7 @@ window.__ModuleLoader__.load({
           returnFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null
         }
         root.style.display = 'flex'
+        markStageDirty()
         keyHandler = (event) => {
           // Only keys that land in the overlay are ours. Once a picture has been
           // pasted the focus is in the composer, and Enter there must send.
@@ -2260,7 +2313,7 @@ window.__ModuleLoader__.load({
       /** Zoom around a stage point, keeping the pixel under it in place. */
       function zoomAt(factor, stageX, stageY) {
         if (image === null || natural.width <= 0) return
-        const box = stage.getBoundingClientRect()
+        const box = stageRect()
         const centerX = box.width / 2
         const centerY = box.height / 2
         const next = clamp(scale * factor)
@@ -2300,6 +2353,7 @@ window.__ModuleLoader__.load({
         }
         if (selectButton !== null) selectButton.setAttribute('aria-pressed', selecting ? 'true' : 'false')
         if (inkbar !== null) inkbar.style.display = selecting ? 'flex' : 'none'
+        markStageDirty()
         if (stage !== null) stage.dataset.selecting = selecting ? '1' : '0'
         if (ink !== null) ink.style.pointerEvents = (selecting === true || inking === true) ? 'auto' : 'none'
         setHint(selecting ? TEXT.hintSelect : TEXT.hintView)
@@ -2322,7 +2376,7 @@ window.__ModuleLoader__.load({
 
       /** Map one viewport point onto source-image pixels (may fall outside the picture). */
       function sourceAt(clientX, clientY) {
-        const box = stage.getBoundingClientRect()
+        const box = stageRect()
         return {
           x: (clientX - box.left - box.width / 2 - offsetX) / scale + natural.width / 2,
           y: (clientY - box.top - box.height / 2 - offsetY) / scale + natural.height / 2,
@@ -2431,7 +2485,7 @@ window.__ModuleLoader__.load({
         } else {
           selection = boxOf(inkDrag.anchor, point)
         }
-        inkPaint()
+        schedulePaint()
       }
 
       /** Finish a region drag, dropping a selection too thin to be meant. */
@@ -2711,7 +2765,7 @@ window.__ModuleLoader__.load({
         } else if (inkDrag.mode === 'crop-move') {
           crop = moveBox(inkDrag.box, point.x - inkDrag.start.x, point.y - inkDrag.start.y)
         }
-        inkPaint()
+        schedulePaint()
       }
 
       /** A click without a drag is not a mark: require a visible size. */
@@ -2747,7 +2801,7 @@ window.__ModuleLoader__.load({
         } else if (before !== null) {
           pushUndo(before)
         }
-        inkPaint()
+        schedulePaint()
       }
 
       /** Paint the crop dim, the marks, the stroke in flight and the selection frame. */
@@ -2755,7 +2809,7 @@ window.__ModuleLoader__.load({
         if (ink === null || image === null || natural.width <= 0) return
         const context = ink.getContext('2d')
         if (context === null) return
-        const box = stage.getBoundingClientRect()
+        const box = stageRect()
         const dpr = window.devicePixelRatio || 1
         const width = Math.max(1, Math.round(box.width * dpr))
         const height = Math.max(1, Math.round(box.height * dpr))
@@ -2936,6 +2990,7 @@ window.__ModuleLoader__.load({
         }
         if (annotateButton !== null) annotateButton.setAttribute('aria-pressed', inking ? 'true' : 'false')
         if (inkbarAnnotate !== null) inkbarAnnotate.style.display = inking ? 'flex' : 'none'
+        markStageDirty()
         if (stage !== null) stage.dataset.inking = inking ? '1' : '0'
         if (ink !== null) ink.style.pointerEvents = (inking === true || selecting === true) ? 'auto' : 'none'
         if (inking === true && stage !== null) stage.dataset.tool = tool
@@ -3419,12 +3474,30 @@ window.__ModuleLoader__.load({
         compareImgB.alt = nameB
         if (compareOverlayA !== null) compareOverlayA.alt = nameA
         if (compareOverlayB !== null) compareOverlayB.alt = nameB
-        await loadInto(compareImgA, paths[compareA] ?? '')
-        await loadInto(compareImgB, paths[compareB] ?? '')
-        if (compareOverlayA !== null) await loadInto(compareOverlayA, paths[compareA] ?? '')
-        if (compareOverlayB !== null) await loadInto(compareOverlayB, paths[compareB] ?? '')
+        await assignCompareImage(compareImgA, compareA)
+        await assignCompareImage(compareImgB, compareB)
+        if (compareOverlayA !== null) await assignCompareImage(compareOverlayA, compareA)
+        if (compareOverlayB !== null) await assignCompareImage(compareOverlayB, compareB)
         paintCompareSplit()
         if (compareMode === 'diff') renderCompareDiff()
+      }
+
+      /**
+       * Point one comparison pane at a path.
+       *
+       * When the pane wants the picture already on screen, reuse the viewer's own
+       * object URL instead of fetching and decoding the same bytes again.
+       * @param {HTMLImageElement} target - the pane's image.
+       * @param {number} at - the path index.
+       * @returns {Promise<void>} resolves once the source is assigned.
+       */
+      async function assignCompareImage(target, at) {
+        if (at === index && image !== null && image.currentSrc !== '') {
+          target.removeAttribute('src')
+          target.src = image.currentSrc
+          return
+        }
+        await loadInto(target, paths[at] ?? '')
       }
 
       /** The diff canvas as a PNG blob; null while there is no computed diff. */
@@ -3824,7 +3897,7 @@ window.__ModuleLoader__.load({
           if (drag === null) return
           offsetX = drag.left + (event.clientX - drag.x)
           offsetY = drag.top + (event.clientY - drag.y)
-          paint()
+          schedulePaint()
         })
         const endDrag = (event) => {
           if (drag === null) return
@@ -4028,6 +4101,7 @@ window.__ModuleLoader__.load({
           if (event.target === root) close()
         })
         document.body.appendChild(root)
+        markStageDirty()
       }
 
       /** Take the overlay out of the page on unload. */

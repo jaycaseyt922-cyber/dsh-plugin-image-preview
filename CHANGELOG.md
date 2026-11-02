@@ -92,6 +92,15 @@ Internal milestones (never published, never numbered as releases):
   asks first instead of silently dropping them.
 - The viewer bar gained `选区`, `标注` and `对比`; `对比` is disabled when the set holds
   fewer than two pictures.
+- Panning and drawing coalesce into one repaint per frame (`requestAnimationFrame`
+  plus a 34 ms fallback for a hidden window) instead of one per pointer event, the
+  picture's transform is only rewritten when it actually changed, and the stage
+  rectangle is cached (invalidated on open, resize and tool-bar changes) so a move no
+  longer forces a synchronous layout. Measured in the harness: 120 pointer moves now
+  cost 0.7 ms and **0** `getBoundingClientRect` calls, down from one layout read and a
+  full canvas repaint per event.
+- The comparison panes reuse the viewer's already-decoded object URL when they show
+  the current picture, so opening a comparison fetches two pictures instead of four.
 - The guidance mentions `recent: true` as the way to bring earlier pictures back.
 
 ### Fixed

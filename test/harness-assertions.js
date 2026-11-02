@@ -422,6 +422,38 @@
     }
   }
 
+  // 0.8 performance: a pan event must not read layout or repaint synchronously.
+  if (firstFigure) {
+    firstFigure.click()
+    await wait(400)
+    const perfStage = document.querySelector('.dsh-ipv-stage')
+    const perfBox = perfStage.getBoundingClientRect()
+    perfStage.dispatchEvent(new PointerEvent('pointerdown', {
+      bubbles: true, cancelable: true, clientX: perfBox.left + 200, clientY: perfBox.top + 200, button: 0, pointerId: 71,
+    }))
+    const originalRect = Element.prototype.getBoundingClientRect
+    let layoutReads = 0
+    Element.prototype.getBoundingClientRect = function () {
+      layoutReads += 1
+      return originalRect.call(this)
+    }
+    const startedAt = performance.now()
+    for (let i = 0; i < 120; i += 1) {
+      perfStage.dispatchEvent(new PointerEvent('pointermove', {
+        bubbles: true, cancelable: true, clientX: perfBox.left + 200 + i, clientY: perfBox.top + 200, button: 0, pointerId: 71,
+      }))
+    }
+    const elapsedMs = performance.now() - startedAt
+    perfStage.dispatchEvent(new PointerEvent('pointerup', {
+      bubbles: true, cancelable: true, clientX: perfBox.left + 320, clientY: perfBox.top + 200, button: 0, pointerId: 71,
+    }))
+    Element.prototype.getBoundingClientRect = originalRect
+    await wait(120)
+    out.perf = { msFor120Moves: Math.round(elapsedMs * 100) / 100, layoutReads }
+    document.querySelector('.dsh-ipv-root').dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))
+    await wait(150)
+  }
+
   window.__result = out
   return 'ok'
 })()
