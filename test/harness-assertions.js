@@ -5,24 +5,29 @@
   const paths = (selector) => [...document.querySelectorAll(selector)].map((el) => el.dataset.ipPath)
   out.chips = paths('.dsh-ip-chip')
   out.figures = paths('.dsh-ip-figure')
-  out.styleOk = !!document.querySelector('style[data-plugin="dsh-local-image-preview"]')
+  // The injected style tag names the package, not the old `dsh-local-image-preview` alias.
+  out.styleOk = !!document.querySelector('style[data-plugin="dsh-plugin-image-preview"]')
   out.chipImg = document.querySelector('.dsh-ip-chip img')?.getAttribute('src') || null
+  // The stylesheet is what makes a chip a chip: an unstyled <img> still loads.
+  out.chipImgWidth = Math.round(document.querySelector('.dsh-ip-chip img')?.getBoundingClientRect().width || 0)
   out.cardRegistration = (window.__registrations || []).map((r) => r.name + ':' + r.key)
 
   // Hover preview: dispatch pointerenter on the first chip, wait past the 220ms timer.
+  // The panel is created lazily, so it must be queried AFTER the event, not before.
   const chip = document.querySelector('.dsh-ip-chip')
-  const hover = document.querySelector('.dsh-ip-hover')
   if (chip) {
     chip.dispatchEvent(new PointerEvent('pointerenter', { bubbles: false }))
     await wait(400)
+    const hover = document.querySelector('.dsh-ip-hover')
+    const hoverImg = hover === null ? null : hover.querySelector('img')
     out.hover = {
-      display: hover ? getComputedStyle(hover).display : null,
-      src: hover?.querySelector('img')?.getAttribute('src') || null,
-      loaded: (() => { const i = hover?.querySelector('img'); return i ? [i.naturalWidth, i.naturalHeight] : null })(),
+      display: hover === null ? null : getComputedStyle(hover).display,
+      src: hoverImg === null ? null : hoverImg.getAttribute('src'),
+      loaded: hoverImg === null ? null : [hoverImg.naturalWidth, hoverImg.naturalHeight],
     }
     chip.dispatchEvent(new PointerEvent('pointerleave', { bubbles: false }))
-    await wait(60)
-    out.hoverAfterLeave = hover ? getComputedStyle(hover).display : null
+    await wait(80)
+    out.hoverAfterLeave = hover === null ? null : getComputedStyle(hover).display
   }
 
   // Viewer from a figure, then close with Escape.
