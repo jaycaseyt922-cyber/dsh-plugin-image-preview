@@ -1770,6 +1770,12 @@ window.__ModuleLoader__.load({
       let compareSplitDrag = false
       let compareDiffActions = []
       let compareDiffReady = false
+      /** Reused diff machinery: two scratch surfaces, one output buffer, one key. */
+      let compareScratchA = null
+      let compareScratchB = null
+      let compareDiffData = null
+      let compareDiffKey = ''
+      let compareDiffMs = 0
       /** The preferences panel and its launcher. */
       let prefsPanel = null
       let prefsButton = null
@@ -3468,6 +3474,7 @@ window.__ModuleLoader__.load({
         if (compareImgA === null || compareImgB === null) return
         compareChanged = 0
         compareDiffReady = false
+        compareDiffKey = ''
         const nameA = baseName(paths[compareA] ?? '')
         const nameB = baseName(paths[compareB] ?? '')
         compareImgA.alt = nameA
@@ -3579,16 +3586,27 @@ window.__ModuleLoader__.load({
       function renderCompareDiff() {
         if (compareCanvas === null || compareImgA === null || compareImgB === null) return
         if (compareImgA.naturalWidth === 0 || compareImgB.naturalWidth === 0) return
+        const key = compareA + ':' + compareB
+        // One pair renders once: switching modes must not recompute 800k pixels.
+        if (compareDiffReady === true && compareDiffKey === key) return
         const width = Math.min(1400, Math.max(1, compareImgA.naturalWidth))
         const height = Math.max(1, Math.round((width / compareImgA.naturalWidth) * compareImgA.naturalHeight))
-        const canvasA = document.createElement('canvas')
-        canvasA.width = width
-        canvasA.height = height
-        const canvasB = document.createElement('canvas')
-        canvasB.width = width
-        canvasB.height = height
-        const ctxA = canvasA.getContext('2d')
-        const ctxB = canvasB.getContext('2d')
+        const startedAt = performance.now()
+        // Reuse both scratch surfaces and the output buffer; a canvas resize is the
+        // allocation that actually costs here, so it only happens when the size changes.
+        if (compareScratchA === null) compareScratchA = document.createElement('canvas')
+        if (compareScratchB === null) compareScratchB = document.createElement('canvas')
+        for (const scratch of [compareScratchA, compareScratchB]) {
+          if (scratch.width !== width || scratch.height !== height) {
+            scratch.width = width
+            scratch.height = height
+          } else {
+            const context = scratch.getContext('2d')
+            if (context !== null) context.clearRect(0, 0, width, height)
+          }
+        }
+        const ctxA = compareScratchA.getContext('2d')
+        const ctxB = compareScratchB.getContext('2d')
         if (ctxA === null || ctxB === null) return
         ctxA.drawImage(compareImgA, 0, 0, width, height)
         ctxB.drawImage(compareImgB, 0, 0, width, height)
@@ -3601,11 +3619,16 @@ window.__ModuleLoader__.load({
           announce(TEXT.failed)
           return
         }
-        compareCanvas.width = width
-        compareCanvas.height = height
+        if (compareCanvas.width !== width || compareCanvas.height !== height) {
+          compareCanvas.width = width
+          compareCanvas.height = height
+        }
         const out = compareCanvas.getContext('2d')
         if (out === null) return
-        const diff = out.createImageData(width, height)
+        if (compareDiffData === null || compareDiffData.width !== width || compareDiffData.height !== height) {
+          compareDiffData = out.createImageData(width, height)
+        }
+        const diff = compareDiffData
         let changed = 0
         for (let at = 0; at < dataA.data.length; at += 4) {
           const delta = Math.abs(dataA.data[at] - dataB.data[at])
@@ -3627,7 +3650,9 @@ window.__ModuleLoader__.load({
         out.putImageData(diff, 0, 0)
         compareChanged = changed
         compareDiffReady = true
-        compareCanvas.title = '差异像素 ' + changed + ' 个（阈值 24）'
+        compareDiffKey = key
+        compareDiffMs = Math.round((performance.now() - startedAt) * 10) / 10
+        compareCanvas.title = '差异像素 ' + changed + ' 个（阈值 24，' + compareDiffMs + ' ms）'
         compareCanvas.setAttribute('aria-label', '差异像素 ' + changed + ' 个')
       }
 

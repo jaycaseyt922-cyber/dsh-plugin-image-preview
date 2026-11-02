@@ -450,6 +450,35 @@
     Element.prototype.getBoundingClientRect = originalRect
     await wait(120)
     out.perf = { msFor120Moves: Math.round(elapsedMs * 100) / 100, layoutReads }
+
+    // The diff render reports its own duration; switching away and back must reuse
+    // the finished result (same title, same milliseconds) instead of recomputing.
+    const perfCompare = [...document.querySelectorAll('.dsh-ipv-tools .dsh-ipv-btn')].find((b) => b.textContent === '对比')
+    if (perfCompare !== undefined) {
+      perfCompare.click()
+      await wait(1400)
+      const findCompareButton = (label) => [...document.querySelectorAll('.dsh-ipv-compare .dsh-ipv-inkbtn')].find((b) => b.textContent === label)
+      const diffButton = findCompareButton('差异')
+      const sideButton = findCompareButton('并排')
+      if (diffButton !== undefined && sideButton !== undefined) {
+        diffButton.click()
+        await wait(80)
+        const canvasEl = document.querySelector('.dsh-ipv-compare-pane canvas')
+        const firstTitle = canvasEl === null ? '' : canvasEl.title
+        sideButton.click()
+        await wait(80)
+        diffButton.click()
+        await wait(60)
+        const secondTitle = canvasEl === null ? '' : canvasEl.title
+        out.perf.diff = {
+          firstMs: (firstTitle.match(/([\d.]+) ms/) ?? [])[1] ?? null,
+          secondTitle,
+          cached: firstTitle !== '' && firstTitle === secondTitle,
+        }
+        document.querySelector('.dsh-ipv-root').dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))
+        await wait(100)
+      }
+    }
     document.querySelector('.dsh-ipv-root').dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))
     await wait(150)
   }

@@ -101,6 +101,9 @@ Internal milestones (never published, never numbered as releases):
   full canvas repaint per event.
 - The comparison panes reuse the viewer's already-decoded object URL when they show
   the current picture, so opening a comparison fetches two pictures instead of four.
+  The diff renders once per pair (its duration lands in the canvas title) and reuses
+  both scratch surfaces and the output buffer, so switching modes back does not
+  recompute ~750k pixels: measured 81.6 ms for the first render, then a cache hit.
 - The guidance mentions `recent: true` as the way to bring earlier pictures back.
 
 ### Fixed
