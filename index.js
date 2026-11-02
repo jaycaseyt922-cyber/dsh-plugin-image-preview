@@ -841,10 +841,13 @@ function registerImageRoute(ctx) {
         return
       }
       const bytes = Buffer.concat(chunks)
-      const isPng = bytes.length >= 8 && bytes[0] === 0x89 && bytes[1] === 0x50 && bytes[2] === 0x4e && bytes[3] === 0x47
-      if (isPng !== true) {
+      // The container decides the extension: PNG for lossless crops, JPEG for the
+      // small exports people paste into chats, WebP when a caller asks for it.
+      const media = bytes.length >= 3 ? sniff(bytes.subarray(0, SNIFF_BYTES)) : null
+      const extension = media === 'image/png' ? '.png' : media === 'image/jpeg' ? '.jpg' : media === 'image/webp' ? '.webp' : ''
+      if (extension === '') {
         entry.status = 415
-        sendJson(res, 415, { ok: false, error: '只接受 PNG' })
+        sendJson(res, 415, { ok: false, error: '只接受 PNG/JPEG/WebP' })
         return
       }
       try {
@@ -854,10 +857,10 @@ function registerImageRoute(ctx) {
         const stamp = at.getFullYear() + pad(at.getMonth() + 1) + pad(at.getDate())
           + '-' + pad(at.getHours()) + pad(at.getMinutes()) + pad(at.getSeconds())
           + '-' + String(at.getMilliseconds()).padStart(3, '0')
-        const target = path.join(SAVE_DIR, 'image-preview-' + stamp + '.png')
+        const target = path.join(SAVE_DIR, 'image-preview-' + stamp + extension)
         writeFileSync(target, bytes)
         entry.status = 200
-        sendJson(res, 200, { ok: true, path: target, bytes: bytes.length })
+        sendJson(res, 200, { ok: true, path: target, bytes: bytes.length, mediaType: media })
       } catch (error) {
         entry.status = 500
         sendJson(res, 500, { ok: false, error: String((error instanceof Error ? error.message : error) || 'write failed') })

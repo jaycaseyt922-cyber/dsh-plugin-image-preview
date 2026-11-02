@@ -240,10 +240,21 @@
         textEditorOpened,
         afterText,
       }
+      // 0.8 export format: the toggle is a preference, and JPG must reach the
+      // composer as image/jpeg (the previous run may have left either state).
+      const formatButton = [...document.querySelectorAll('.dsh-ipv-inkbar-annotate .dsh-ipv-inkbtn')].find((b) => b.textContent.startsWith('格式'))
+      let expectJpeg = false
+      if (formatButton !== undefined) {
+        formatButton.click()
+        await wait(80)
+        expectJpeg = formatButton.textContent.includes('JPG')
+        out.annotateDraft.formatLabel = formatButton.textContent
+      }
       press('Enter')
       await wait(900)
       out.annotateSend = {
         pasted,
+        expectedType: expectJpeg ? 'image/jpeg' : 'image/png',
         viewer: getComputedStyle(document.querySelector('.dsh-ipv-root')).display,
         tile: document.querySelector('img[data-test-tile="1"]') !== null,
       }
@@ -352,7 +363,7 @@
           document.body.append(tile)
         })
         document.body.append(diffComposer)
-        const sendDiffButton = [...document.querySelectorAll('.dsh-ipv-compare .dsh-ipv-inkbtn')].find((b) => b.textContent === '发送差异')
+        const sendDiffButton = document.querySelector('.dsh-ipv-compare [data-action="send-diff"]')
         if (sendDiffButton !== undefined) {
           sendDiffButton.click()
           await wait(900)

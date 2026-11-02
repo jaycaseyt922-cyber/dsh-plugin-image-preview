@@ -155,10 +155,47 @@ window.__ModuleLoader__.load({
         dirtyDrop: '放弃（Esc）',
         nothingToSend: '先画点东西或框一块',
         textPlaceholder: '标注文字…',
+        format: '格式',
+        formatPng: 'PNG',
+        formatJpeg: 'JPG',
+        formatTitle: '导出格式（PNG 无损 / JPG 体积小，写作/分享常用 JPG）',
       },
     }
     /** The table the viewer reads; `COPY.en` lands with the locale hook. */
     const TEXT = COPY.zh
+
+    /** Where this machine keeps the viewer's own preferences (not the profile). */
+    const PREFS_KEY = 'dsh-image-preview:prefs'
+    /** Defaults; every key is optional on disk and merged over these. */
+    const PREFS_DEFAULTS = { format: 'png', quality: 0.85 }
+
+    /** Read the local preferences, merging whatever is on disk over the defaults. */
+    function loadPrefs() {
+      const out = { ...PREFS_DEFAULTS }
+      try {
+        const raw = localStorage.getItem(PREFS_KEY)
+        if (raw === null) return out
+        const parsed = JSON.parse(raw)
+        if (parsed === null || typeof parsed !== 'object') return out
+        if (parsed.format === 'png' || parsed.format === 'jpeg') out.format = parsed.format
+        if (typeof parsed.quality === 'number' && parsed.quality >= 0.3 && parsed.quality <= 1) out.quality = parsed.quality
+      } catch {
+        /* no storage, or a corrupt value: defaults win */
+      }
+      return out
+    }
+
+    /** Persist the preferences; a private-mode failure must not break the viewer. */
+    function savePrefs(next) {
+      try {
+        localStorage.setItem(PREFS_KEY, JSON.stringify(next))
+      } catch {
+        /* storage is a convenience, not a requirement */
+      }
+    }
+
+    /** The live preferences (module scope: both the annotator and the picker read it). */
+    let prefs = loadPrefs()
 
     const CSS = `
 .dsh-ip-chip {
@@ -1170,11 +1207,11 @@ window.__ModuleLoader__.load({
     }
 
     /** A file name for one sent picture; the prefix doubles as the landing anchor. */
-    function fileStamp(now) {
+    function fileStamp(now, extension) {
       const at = new Date(now)
       const pad = (value) => String(value).padStart(2, '0')
       return ATTACHMENT_PREFIX + at.getFullYear() + pad(at.getMonth() + 1) + pad(at.getDate())
-        + '-' + pad(at.getHours()) + pad(at.getMinutes()) + pad(at.getSeconds()) + '.png'
+        + '-' + pad(at.getHours()) + pad(at.getMinutes()) + pad(at.getSeconds()) + (extension ?? '.png')
     }
 
     /**
@@ -1284,18 +1321,33 @@ window.__ModuleLoader__.load({
      * @param {object[]} [marks] - annotations, in source pixels; empty for the region-only path.
      * @returns {Promise<Blob>} the PNG bytes.
      */
-    function exportPng(picture, crop, marks) {
+    /**
+     * Cut the annotated region out of the picture.
+     * @param {HTMLImageElement} picture - the loaded source picture.
+     * @param {{ x: number, y: number, w: number, h: number } | null} crop - the region, or null for all of it.
+     * @param {object[]} [marks] - annotations, in source pixels; empty for the region-only path.
+     * @param {{ type?: 'png' | 'jpeg', quality?: number }} [options] - output format and JPEG quality.
+     * @returns {Promise<Blob>} the encoded picture.
+     */
+    function exportPng(picture, crop, marks, options) {
       if (picture === null || picture.naturalWidth <= 0) return Promise.reject(new Error(TEXT.failed))
       const full = crop === null || crop === undefined
       const width = full ? picture.naturalWidth : Math.max(1, Math.round(crop.w))
       const height = full ? picture.naturalHeight : Math.max(1, Math.round(crop.h))
       const offsetX = full ? 0 : Math.round(crop.x)
       const offsetY = full ? 0 : Math.round(crop.y)
+      const type = options?.type === 'jpeg' ? 'image/jpeg' : 'image/png'
+      const quality = typeof options?.quality === 'number' ? options.quality : 0.85
       const canvas = document.createElement('canvas')
       canvas.width = width
       canvas.height = height
       const context = canvas.getContext('2d')
       if (context === null) return Promise.reject(new Error(TEXT.failed))
+      // JPEG has no alpha: without a matte every transparent pixel turns black.
+      if (type === 'image/jpeg') {
+        context.fillStyle = '#ffffff'
+        context.fillRect(0, 0, width, height)
+      }
       context.drawImage(picture, offsetX, offsetY, width, height, 0, 0, width, height)
       context.translate(-offsetX, -offsetY)
       drawMarks(context, marks ?? [], null)
@@ -1303,7 +1355,7 @@ window.__ModuleLoader__.load({
         canvas.toBlob((blob) => {
           if (blob === null) reject(new Error(TEXT.failed))
           else resolve(blob)
-        }, 'image/png')
+        }, type, quality)
       })
     }
 
@@ -1324,7 +1376,7 @@ window.__ModuleLoader__.load({
         return false
       }
       const transfer = new DataTransfer()
-      transfer.items.add(new File([blob], name, { type: 'image/png' }))
+      transfer.items.add(new File([blob], name, { type: blob.type === '' ? 'image/png' : blob.type }))
       if (text !== '') transfer.setData('text/plain', text)
       try {
         editor.focus({ preventScroll: true })
@@ -2756,7 +2808,7 @@ window.__ModuleLoader__.load({
       function exportAnnotated() {
         const area = crop === null ? natural.width * natural.height : crop.w * crop.h
         if (area > MAX_EXPORT_PIXELS) return Promise.reject(new Error(TEXT.tooBig))
-        return exportPng(image, crop, marks)
+        return exportPng(image, crop, marks, { type: prefs.format, quality: prefs.quality })
       }
 
       /** Send the annotated picture with the chosen instruction. */
@@ -2767,7 +2819,7 @@ window.__ModuleLoader__.load({
         }
         try {
           const blob = await exportAnnotated()
-          const name = fileStamp(Date.now())
+          const name = fileStamp(Date.now(), prefs.format === 'jpeg' ? '.jpg' : '.png')
           const before = attachmentCount()
           const editor = findComposer(root)
           if (editor === null) {
@@ -2805,12 +2857,12 @@ window.__ModuleLoader__.load({
       }
 
       /** Ask the host to write the PNG to its temp directory and say where. */
-      /** Write one PNG through the host's write route and say where it landed. */
+      /** Write one picture through the host's write route and say where it landed. */
       async function saveBlob(blob) {
         const response = await fetch(new URL('image-preview/save', document.baseURI).href, {
           method: 'POST',
           credentials: 'same-origin',
-          headers: { 'content-type': 'image/png' },
+          headers: { 'content-type': blob.type === '' ? 'image/png' : blob.type },
           body: blob,
         })
         const report = await response.json().catch(() => null)
@@ -2981,6 +3033,8 @@ window.__ModuleLoader__.load({
         const diffSaveButton = button(TEXT.compareSaveDiff, () => {
           saveCompareDiff().catch(() => {})
         })
+        diffSendButton.dataset.action = 'send-diff'
+        diffSaveButton.dataset.action = 'save-diff'
         diffSendButton.style.display = 'none'
         diffSaveButton.style.display = 'none'
         compareDiffActions = [diffSendButton, diffSaveButton]
@@ -3575,6 +3629,19 @@ window.__ModuleLoader__.load({
         const saveButton = chip('dsh-ipv-inkbtn', TEXT.save, TEXT.save + '（Ctrl+S）')
         saveButton.addEventListener('click', () => {
           saveAnnotated().catch(() => {})
+        })
+        const formatButton = chip(
+          'dsh-ipv-inkbtn',
+          TEXT.format + ' ' + (prefs.format === 'png' ? TEXT.formatPng : TEXT.formatJpeg),
+          TEXT.formatTitle,
+        )
+        const paintFormatButton = () => {
+          formatButton.textContent = TEXT.format + ' ' + (prefs.format === 'png' ? TEXT.formatPng : TEXT.formatJpeg)
+        }
+        formatButton.addEventListener('click', () => {
+          prefs = { ...prefs, format: prefs.format === 'png' ? 'jpeg' : 'png' }
+          savePrefs(prefs)
+          paintFormatButton()
         })
         const closeButton = chip('dsh-ipv-inkbtn', TEXT.cancel, TEXT.cancel + '（Esc）')
         closeButton.addEventListener('click', () => setInking(false))

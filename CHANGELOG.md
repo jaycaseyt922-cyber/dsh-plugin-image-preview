@@ -42,6 +42,10 @@ Internal milestones (never published, never numbered as releases):
 - A "discard the marks?" question before closing or paging away from unsaved work:
   keep editing / copy then leave / discard (`Esc`). Marks stay drawn after leaving
   the tool bar; only closing or paging asks.
+- Export format preference (`格式 PNG/JPG`): JPEG uses quality 0.85 and a white matte
+  (transparency would otherwise turn black); the sent file name and the saved
+  extension follow the container. `POST /image-preview/save` now accepts
+  PNG/JPEG/WebP and derives the extension from the bytes, not from the caller.
 
 **Comparison**
 - A/B comparison in the viewer (`对比`, `D`): side-by-side, overlay with a draggable

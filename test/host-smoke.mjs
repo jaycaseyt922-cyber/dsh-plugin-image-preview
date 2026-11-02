@@ -197,6 +197,18 @@ results.save = {
   sameBytes: savedBytes.length === pngBytes.length && savedBytes.subarray(0, 8).equals(pngBytes.subarray(0, 8)),
 }
 if (savedPath !== '') unlinkSync(savedPath)
+// JPEG exports are a different container: the extension has to follow the bytes.
+const jpegBytes = Buffer.concat([Buffer.from([0xff, 0xd8, 0xff, 0xe0]), Buffer.alloc(28, 9)])
+const savedJpeg = request('/image-preview/save', 'POST', jpegBytes)
+const savedJpegBody = JSON.parse(String(savedJpeg.body ?? '{}'))
+const savedJpegPath = typeof savedJpegBody.path === 'string' ? savedJpegBody.path : ''
+results.saveJpeg = {
+  status: savedJpeg.status,
+  media: savedJpegBody.mediaType,
+  jpgExtension: savedJpegPath.endsWith('.jpg'),
+  wroteFile: savedJpegPath !== '' && existsSync(savedJpegPath),
+}
+if (savedJpegPath !== '') unlinkSync(savedJpegPath)
 const notPng = request('/image-preview/save', 'POST', Buffer.from('definitely not a png'))
 results.saveRejected = notPng.status
 
@@ -301,6 +313,9 @@ if (results.save?.status !== 200 || results.save?.ok !== true) failures.push('sa
 if (results.save?.wroteFile !== true || results.save?.named !== true) failures.push('savePath')
 if (results.save?.sameBytes !== true || results.save?.bytes !== pngBytes.length) failures.push('saveBytes')
 if (results.saveRejected !== 415) failures.push('saveRejectsNonPng')
+if (results.saveJpeg?.status !== 200) failures.push('saveJpeg')
+if (results.saveJpeg?.media !== 'image/jpeg') failures.push('saveJpegMedia')
+if (results.saveJpeg?.jpgExtension !== true || results.saveJpeg?.wroteFile !== true) failures.push('saveJpegPath')
 if (results.saveRefused !== 401) failures.push('saveFence')
 // `recent` is per conversation, newest first, and bounded.
 if (results.recentA?.length !== 2) failures.push('recentCount')
