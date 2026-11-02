@@ -30,6 +30,10 @@ const ctx = {
       tools.push(definition)
       return () => {}
     },
+    // The capability route asks this: one vision tool exists, the others do not.
+    get(name) {
+      return name === 'vision_describe' ? { name } : undefined
+    },
   },
   systemPrompt: {
     section(definition) {
@@ -161,6 +165,10 @@ results.route405 = wrongMethod.status
 const unknown = request('/image-preview/other')
 results.routeUnknown = unknown.status
 
+// The capability route the viewer asks before it offers "看图".
+const caps = request('/image-preview/capabilities')
+results.capabilities = { status: caps.status, body: JSON.parse(String(caps.body ?? '{}')) }
+
 const diag = request('/image-preview/diag?path=' + encodeURIComponent(fixture.png))
 results.diag = { status: diag.status, ok: JSON.parse(String(diag.body)).ok }
 
@@ -211,6 +219,8 @@ results.diagUntrusted = {
 }
 const reportRefused = request('/image-preview/client-report', 'POST', JSON.stringify({ stage: 'smoke' }))
 results.reportRefused = reportRefused.status
+// The capability answer names tools, not files: it is still fenced like the rest.
+results.capabilitiesRefused = request('/image-preview/capabilities').status
 rejectAs = undefined
 const reportTrusted = request('/image-preview/client-report', 'POST', JSON.stringify({ stage: 'smoke-trusted' }))
 results.reportTrusted = reportTrusted.status
@@ -248,6 +258,11 @@ if (JSON.parse(String(results.relativeDiag?.body ?? '{}'))?.ok !== false) failur
 if (results.diagUntrusted?.status !== 200) failures.push('diagUntrusted')
 if (results.diagUntrusted?.trusted !== false || results.diagUntrusted?.leaksAsked !== false) failures.push('diagLeak')
 if (results.reportRefused !== 401) failures.push('reportFence')
+// The capability route answers which vision tools exist, and stays behind the fence.
+if (results.capabilities?.status !== 200) failures.push('capabilities')
+if (results.capabilities?.body?.vision?.describe !== true) failures.push('capabilitiesDescribe')
+if (results.capabilities?.body?.vision?.ocr !== false) failures.push('capabilitiesOcr')
+if (results.capabilitiesRefused !== 401) failures.push('capabilitiesFence')
 if (results.reportTrusted !== 204) failures.push('reportTrusted')
 // The binary answer is the transport the page uses now.
 if (results.routePostBinary?.status !== 200) failures.push('postBinary')

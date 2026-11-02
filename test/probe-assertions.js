@@ -5,7 +5,9 @@
 //
 // 用法（探针见 tools/probe.ps1 开头的两条硬约定）：
 //   powershell -NoProfile -ExecutionPolicy Bypass -File tools\probe.ps1 -Start -Supervise -ExitAfter 120
-//   node tools/cdp.mjs eval "$(Get-Content test\probe-assertions.js -Raw)"     # 或在 CDP 里注入本文件
+//   node tools/cdp.mjs eval-file test\probe-assertions.js
+// 不要用 `eval "$(Get-Content … -Raw)"`：PowerShell 在第一个双引号处把参数截断，
+// 求值的只剩开头注释（实测 5.9 KB → 139 B，返回 undefined）。
 //
 // 断言：流式增长不重复、路径消失后原文恢复、反复重写不丢图、坏路径只失败一次且文案可读、好路径仍走 blob。
 // 结果直接从 Runtime.evaluate 的返回值读，不写文件。
@@ -87,6 +89,60 @@
   out.goodPath = {
     chipPixels: goodChip ? [goodChip.naturalWidth, goodChip.naturalHeight] : null,
     srcPrefix: goodChip ? goodChip.src.slice(0, 12) : null,
+  }
+
+  // 6. 0.4：选区 → 看图 → 真宿主 composer 里出现缩略图 + 指令文本
+  const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
+  const chip = g.host.querySelector('.dsh-ip-chip')
+  if (chip === null || chip === undefined) {
+    out.selection = { error: 'no chip to open' }
+  } else {
+    chip.click()
+    await sleep(1200)
+    const selectButton = [...document.querySelectorAll('.dsh-ipv-btn')].find((b2) => b2.textContent === '选区')
+    if (selectButton === undefined) {
+      out.selection = { error: 'no selection button' }
+    } else {
+      selectButton.click()
+      await sleep(200)
+      const layer = document.querySelector('.dsh-ipv-ink')
+      const stageBox = document.querySelector('.dsh-ipv-stage').getBoundingClientRect()
+      const fire = (type, x, y) => layer.dispatchEvent(new PointerEvent(type, {
+        bubbles: true,
+        cancelable: true,
+        clientX: x,
+        clientY: y,
+        button: 0,
+        pointerId: 11,
+      }))
+      // A box in the middle of the picture, away from the edges.
+      fire('pointerdown', stageBox.left + stageBox.width * 0.35, stageBox.top + stageBox.height * 0.35)
+      fire('pointermove', stageBox.left + stageBox.width * 0.62, stageBox.top + stageBox.height * 0.6)
+      fire('pointerup', stageBox.left + stageBox.width * 0.62, stageBox.top + stageBox.height * 0.6)
+      await sleep(200)
+      // Read the label before Enter: a successful send clears the selection (and
+      // with it the canvas label), so a later read would only measure the teardown.
+      const selectionLabel = layer.getAttribute('aria-label')
+      const before = document.querySelectorAll('img[alt^="image-preview-"]').length
+      document.querySelector('.dsh-ipv-root').dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }))
+      await sleep(1600)
+      const tiles = [...document.querySelectorAll('img[alt^="image-preview-"]')]
+      const editor = document.querySelector('[data-lexical-editor=true]')
+      out.selection = {
+        label: selectionLabel,
+        viewerAfterEnter: getComputedStyle(document.querySelector('.dsh-ipv-root')).display,
+        newTiles: tiles.length - before,
+        tileAlt: tiles.length === 0 ? null : tiles[tiles.length - 1].alt,
+        editorHasInstruction: editor === null ? null : (editor.innerText || '').includes('来源：'),
+        editorHasSource: editor === null ? null : (editor.innerText || '').includes('原图裁切'),
+      }
+      // Leave the draft as we found it: drop the tile and the text we added.
+      for (const tile of tiles) {
+        const button = tile.closest('button')
+        if (button !== null) button.click()
+      }
+      if (editor !== null) editor.textContent = ''
+    }
   }
 
   for (const id of ['ip-h1', 'ip-h2', 'ip-h3', 'ip-h4']) document.getElementById(id)?.remove()

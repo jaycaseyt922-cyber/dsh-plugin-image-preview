@@ -54,6 +54,54 @@ window.__ModuleLoader__.load({
     /** Zoom bounds for the viewer. */
     const MIN_SCALE = 0.05
     const MAX_SCALE = 16
+    /** How close, in screen pixels, a press must land to grab a selection handle. */
+    const GRAB_PX = 8
+    /** The smallest useful selection, in source pixels: anything thinner is a slip. */
+    const MIN_SELECTION = 8
+    /** One crop may not exceed this many source pixels (40 MP is already ~30 MB as PNG). */
+    const MAX_EXPORT_PIXELS = 40 * 1000 * 1000
+    /** The composer's editor: a Lexical root, host-verified as the only one on the page. */
+    const EDITOR_SELECTOR = '[data-lexical-editor="true"]'
+    /** Sent pictures carry this name prefix, and the "did it land" check looks for it. */
+    const ATTACHMENT_PREFIX = 'image-preview-'
+    /** The instructions offered next to a selection, in bar order. */
+    const TEMPLATES = ['describe', 'ocr', 'diff']
+    /**
+     * Every string the viewer adds, in one table.
+     *
+     * The plugin has no settings page yet, and 0.6 wires `ctx.locale` over this
+     * object; until then Chinese is the only shipped language.
+     */
+    const COPY = {
+      zh: {
+        select: '选区',
+        selectTitle: '框选一块（S）',
+        toolbar: '选区操作',
+        template: '指令',
+        templates: { describe: '描述', ocr: '转文字', diff: '对比' },
+        instructions: {
+          describe: '看这张图：图里这块内容是什么？有没有明显的问题？',
+          ocr: '把这张图里的文字抄出来，保留原有换行和标点。',
+          diff: '和上一张图对比，指出有哪些不同（位置 + 变化）。',
+        },
+        source: '来源：{path}（原图裁切 {x},{y},{w},{h}）',
+        look: '看图',
+        copy: '复制',
+        cancel: '取消',
+        hintSelect: '拖动框选一块 · Enter 看图 · Ctrl+C 复制 · Esc 取消选区',
+        hintView: '滚轮缩放 · 拖动平移 · 双击切换适应/1:1 · ←/→ 换图 · S 选区 · Esc 关闭',
+        sent: '已发到输入框',
+        copied: '已复制到剪贴板',
+        fallback: '没找到输入框，已复制到剪贴板：Ctrl+V 即可发送',
+        noCaps: '未检测到 vision-router（图片仍会进入对话）',
+        tooBig: '选区太大（超过 40MP），请先框小一点',
+        failed: '导出失败',
+        pageFirst: '先取消选区再换图',
+        noClipboard: '当前环境不能复制图片',
+      },
+    }
+    /** The table the viewer reads; `COPY.en` lands with the locale hook. */
+    const TEXT = COPY.zh
 
     const CSS = `
 .dsh-ip-chip {
@@ -328,6 +376,80 @@ window.__ModuleLoader__.load({
   padding: 6px 12px 10px;
   font-size: 11px;
   opacity: 0.5;
+}
+.dsh-ipv-ink {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  pointer-events: none;
+  touch-action: none;
+}
+.dsh-ipv-stage[data-selecting="1"] {
+  cursor: crosshair;
+}
+.dsh-ipv-inkbar {
+  display: none;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 12px 8px;
+  font-size: 12px;
+}
+.dsh-ipv-inklabel {
+  margin-right: 2px;
+  opacity: 0.6;
+}
+.dsh-ipv-tpl,
+.dsh-ipv-inkbtn {
+  height: 26px;
+  padding: 0 10px;
+  border: 1px solid rgba(255, 255, 255, 0.16);
+  border-radius: 6px;
+  background: rgba(255, 255, 255, 0.06);
+  color: inherit;
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+}
+.dsh-ipv-tpl:hover,
+.dsh-ipv-inkbtn:hover {
+  background: rgba(255, 255, 255, 0.14);
+}
+.dsh-ipv-tpl[aria-pressed="true"] {
+  border-color: rgba(255, 255, 255, 0.34);
+  background: rgba(255, 255, 255, 0.2);
+}
+.dsh-ipv-inkbtn-primary {
+  border-color: transparent;
+  background: var(--dsw-alias-brand-primary, #2f6fed);
+  color: #fff;
+  font-weight: 600;
+}
+.dsh-ipv-inkbtn-primary:hover {
+  background: var(--dsw-alias-brand-primary, #2f6fed);
+  filter: brightness(1.08);
+}
+.dsh-ipv-inkspacer {
+  flex: 1;
+}
+.dsh-ipv-status {
+  position: absolute;
+  left: 50%;
+  bottom: 48px;
+  max-width: 70%;
+  padding: 6px 12px;
+  border-radius: 999px;
+  background: rgba(0, 0, 0, 0.72);
+  color: #fff;
+  font-size: 12px;
+  opacity: 0;
+  transition: opacity 120ms ease;
+  pointer-events: none;
+  transform: translateX(-50%);
+}
+.dsh-ipv-status[data-on="1"] {
+  opacity: 1;
 }
 `
 
@@ -776,6 +898,181 @@ window.__ModuleLoader__.load({
       return out
     }
 
+    // --------------------------- composer bridge ---------------------------
+
+    /**
+     * The composer editor that last had focus.
+     *
+     * A viewer opened from a thumbnail has no spatial relation to the composer,
+     * so "nearest ancestor" finds nothing; remembering the last editor a key press
+     * or click landed in is what makes the second step of `findComposer` work.
+     */
+    let lastEditor = null
+
+    /** Keep the last focused contenteditable, for `findComposer`. */
+    function rememberEditor(event) {
+      const target = event.target
+      if (target instanceof HTMLElement && target.isContentEditable === true) lastEditor = target
+    }
+
+    /**
+     * Find the composer a picture should be sent to.
+     *
+     * Nearest editor in the anchor's ancestors wins (a figure sits in the
+     * conversation whose composer it belongs to), then the editor that last had
+     * focus, then the last visible one in the document. Only visible, connected
+     * editors count: an unmounted route keeps stale DOM around.
+     * @param {Element | null} anchor - where the request came from.
+     * @returns {HTMLElement | null} the editor root, or null when there is none.
+     */
+    function findComposer(anchor) {
+      const usable = (node) => node instanceof HTMLElement && node.isContentEditable === true
+        && node.isConnected === true && node.getClientRects().length > 0
+      for (let node = anchor ?? null; node !== null; node = node.parentElement) {
+        const found = typeof node.querySelector === 'function' ? node.querySelector(EDITOR_SELECTOR) : null
+        if (usable(found)) return found
+      }
+      if (usable(lastEditor)) return lastEditor
+      const all = Array.from(document.querySelectorAll(EDITOR_SELECTOR)).filter((node) => usable(node))
+      return all.length === 0 ? null : all[all.length - 1]
+    }
+
+    /** A file name for one sent picture; the prefix doubles as the landing anchor. */
+    function fileStamp(now) {
+      const at = new Date(now)
+      const pad = (value) => String(value).padStart(2, '0')
+      return ATTACHMENT_PREFIX + at.getFullYear() + pad(at.getMonth() + 1) + pad(at.getDate())
+        + '-' + pad(at.getHours()) + pad(at.getMinutes()) + pad(at.getSeconds()) + '.png'
+    }
+
+    /**
+     * Cut the annotated region out of the picture as a PNG.
+     *
+     * Coordinates are source pixels, so the same crop lands on the same pixels
+     * whatever the on-screen zoom. A plain canvas (not `OffscreenCanvas`) keeps
+     * this working on every carrier the desktop ships.
+     * @param {HTMLImageElement} picture - the loaded source picture.
+     * @param {{ x: number, y: number, w: number, h: number } | null} crop - the region, or null for all of it.
+     * @returns {Promise<Blob>} the PNG bytes.
+     */
+    function exportPng(picture, crop) {
+      if (picture === null || picture.naturalWidth <= 0) return Promise.reject(new Error(TEXT.failed))
+      const full = crop === null || crop === undefined
+      const width = full ? picture.naturalWidth : Math.max(1, Math.round(crop.w))
+      const height = full ? picture.naturalHeight : Math.max(1, Math.round(crop.h))
+      const offsetX = full ? 0 : Math.round(crop.x)
+      const offsetY = full ? 0 : Math.round(crop.y)
+      const canvas = document.createElement('canvas')
+      canvas.width = width
+      canvas.height = height
+      const context = canvas.getContext('2d')
+      if (context === null) return Promise.reject(new Error(TEXT.failed))
+      context.drawImage(picture, offsetX, offsetY, width, height, 0, 0, width, height)
+      return new Promise((resolve, reject) => {
+        canvas.toBlob((blob) => {
+          if (blob === null) reject(new Error(TEXT.failed))
+          else resolve(blob)
+        }, 'image/png')
+      })
+    }
+
+    /**
+     * Hand a PNG plus one instruction to the composer, the way a user's Ctrl+V does.
+     *
+     * The composer is a Lexical editor: its paste command takes the files and the
+     * plain text out of the very same `clipboardData` (host-verified), so one
+     * synthetic paste both attaches the picture and types the instruction.
+     * @param {HTMLElement} editor - the composer's editor root.
+     * @param {Blob} blob - the PNG.
+     * @param {string} name - the file name the attachment shows (and reports back in `alt`).
+     * @param {string} text - the instruction to type; empty leaves the draft untouched.
+     * @returns {boolean} whether the composer claimed the event.
+     */
+    function pasteImageWithText(editor, blob, name, text) {
+      if (typeof DataTransfer !== 'function' || typeof ClipboardEvent !== 'function' || typeof File !== 'function') {
+        return false
+      }
+      const transfer = new DataTransfer()
+      transfer.items.add(new File([blob], name, { type: 'image/png' }))
+      if (text !== '') transfer.setData('text/plain', text)
+      try {
+        editor.focus({ preventScroll: true })
+      } catch {
+        /* focus is a courtesy: the paste command does not need it */
+      }
+      const event = new ClipboardEvent('paste', { clipboardData: transfer, bubbles: true, cancelable: true })
+      editor.dispatchEvent(event)
+      return event.defaultPrevented === true
+    }
+
+    /**
+     * Whether a picture we just pasted is really in the draft.
+     *
+     * `preventDefault` alone is not proof: the editor cancels the event even when
+     * its attachment intake refuses the file. The host puts the file name in the
+     * thumbnail's `alt`, which is the one stable hook (class names are hashed).
+     * @param {string} name - the file name handed to `pasteImageWithText`.
+     * @param {number} before - how many of our tiles existed before the paste.
+     * @returns {boolean} true when the attachment tile is in the document.
+     */
+    function attachmentLanded(name, before) {
+      if (document.querySelector('img[alt="' + cssEscape(name) + '"]') !== null) return true
+      let count = 0
+      for (const node of document.querySelectorAll('img[alt]')) {
+        if (String(node.alt).startsWith(ATTACHMENT_PREFIX)) count += 1
+      }
+      return count > before
+    }
+
+    /** How many of our own slides are already on the page (a baseline for one paste). */
+    function attachmentCount() {
+      let count = 0
+      for (const node of document.querySelectorAll('img[alt]')) {
+        if (String(node.alt).startsWith(ATTACHMENT_PREFIX)) count += 1
+      }
+      return count
+    }
+
+    /** Write one PNG to the clipboard, reporting the reason when the carrier says no. */
+    async function copyToClipboard(blob) {
+      const clip = navigator.clipboard
+      if (clip === undefined || typeof clip.write !== 'function' || typeof ClipboardItem !== 'function') {
+        throw new Error(TEXT.noClipboard)
+      }
+      await clip.write([new ClipboardItem({ 'image/png': blob })])
+    }
+
+    /** The last capability answer, so ten viewers in one minute ask the host once. */
+    let capabilityCache = { at: 0, value: null }
+
+    /**
+     * Ask the host which vision tools it currently exposes.
+     *
+     * The browser half cannot see the tool registry; this route is the only way
+     * to say whether "看这块" will reach a vision route. A missing or failed
+     * route answers `null` = unknown, which only changes the tooltip.
+     * @returns {Promise<{describe?: boolean, ocr?: boolean, diff?: boolean} | null>} the answer.
+     */
+    async function visionCapabilities() {
+      const now = Date.now()
+      if (capabilityCache.value !== null && now - capabilityCache.at < 5000) return capabilityCache.value
+      try {
+        const url = new URL('image-preview/capabilities', document.baseURI).href
+        const response = await fetch(url, { credentials: 'same-origin' })
+        if (response.ok !== true) {
+          capabilityCache = { at: now, value: null }
+          return null
+        }
+        const report = await response.json()
+        const vision = report !== null && typeof report.vision === 'object' && report.vision !== null ? report.vision : null
+        capabilityCache = { at: now, value: vision }
+        return vision
+      } catch {
+        capabilityCache = { at: now, value: null }
+        return null
+      }
+    }
+
     // ------------------------------ the viewer ------------------------------
 
     /**
@@ -813,6 +1110,27 @@ window.__ModuleLoader__.load({
       let postFailure = ''
       /** The element to give the keyboard back to when the overlay closes. */
       let returnFocus = null
+      /** The selection layer painted above the picture. */
+      let ink = null
+      /** The instruction bar under the stage, and the buttons it owns. */
+      let inkbar = null
+      let selectButton = null
+      let templateButtons = []
+      let lookButton = null
+      /** The one-line hint under the stage, and the toast above it. */
+      let hintLabel = null
+      let statusLabel = null
+      let statusTimer = 0
+      /** The box the reader dragged, in source pixels; null when there is none. */
+      let selection = null
+      /** Whether the viewer is in selection mode (canvas takes pointer events). */
+      let selecting = false
+      /** The instruction the next send carries. */
+      let template = 'describe'
+      /** The drag in flight: `{ mode, anchor?, start?, box? }` in source pixels. */
+      let inkDrag = null
+      /** The window resize listener, installed while the overlay is open. */
+      let resizeHandler = null
 
       /** Clamp the scale to the viewer's bounds. */
       const clamp = (value) => Math.min(MAX_SCALE, Math.max(MIN_SCALE, value))
@@ -824,6 +1142,9 @@ window.__ModuleLoader__.load({
           'translate(-50%, -50%) translate(' + offsetX.toFixed(1) + 'px, ' + offsetY.toFixed(1) + 'px) scale(' + scale.toFixed(4) + ')'
         image.dataset.pixel = scale >= 3 ? '1' : '0'
         if (zoomLabel !== null) zoomLabel.textContent = Math.round(scale * 100) + '%'
+        // Same frame as the picture: a selection painted a frame later visibly
+        // slides against the image during a fast pan.
+        inkPaint()
       }
 
       /** Fit the picture inside the stage, centred. */
@@ -967,6 +1288,10 @@ window.__ModuleLoader__.load({
         prevButton.disabled = index <= 0
         nextButton.disabled = index >= paths.length - 1
         natural = { width: 0, height: 0 }
+        // The box was drawn on the previous picture: it means nothing here.
+        selection = null
+        inkDrag = null
+        inkPaint()
         scale = 1
         offsetX = 0
         offsetY = 0
@@ -1046,6 +1371,12 @@ window.__ModuleLoader__.load({
         if (paths.length === 0) return
         bust = 0
         natural = { width: 0, height: 0 }
+        // A fresh open never inherits a box from the last one.
+        setSelecting(false)
+        if (resizeHandler === null) {
+          resizeHandler = () => paint()
+          window.addEventListener('resize', resizeHandler)
+        }
         if (!root.isConnected) document.body.appendChild(root)
         // Remember where the keyboard came from, and never stack two hooks on one
         // overlay (a second open would make every arrow key step twice).
@@ -1056,25 +1387,50 @@ window.__ModuleLoader__.load({
         }
         root.style.display = 'flex'
         keyHandler = (event) => {
-          if ((event.ctrlKey === true || event.metaKey === true) && (event.key === 'c' || event.key === 'C')) {
+          // Only keys that land in the overlay are ours. Once a picture has been
+          // pasted the focus is in the composer, and Enter there must send.
+          // A key with no focused element arrives on `document`/`body`: while the
+          // modal is up those still belong to it, or Escape would trap the reader.
+          const target = event.target
+          const inside = root !== null
+            && (target === document || target === document.body || root.contains(target) === true)
+          if (inside !== true) return
+          const accel = event.ctrlKey === true || event.metaKey === true
+          if (accel === true && (event.key === 'c' || event.key === 'C')) {
             event.preventDefault()
             event.stopPropagation()
-            copyImage().catch(() => {})
+            if (selecting === true && selection !== null) copySelection().catch(() => {})
+            else copyImage().catch(() => {})
+            return
+          }
+          if (accel === false && (event.key === 's' || event.key === 'S')) {
+            event.preventDefault()
+            event.stopPropagation()
+            toggleSelecting()
             return
           }
           if (event.key === 'Escape') {
             event.preventDefault()
             event.stopPropagation()
-            close()
+            if (selection !== null) setSelecting(false)
+            else close()
+            return
+          }
+          if (event.key === 'Enter' && selecting === true) {
+            event.preventDefault()
+            event.stopPropagation()
+            sendSelection().catch(() => {})
             return
           }
           if (event.key === 'ArrowLeft' && index > 0) {
+            if (pageBlocked()) return
             event.preventDefault()
             event.stopPropagation()
             show(index - 1)
             return
           }
           if (event.key === 'ArrowRight' && index < paths.length - 1) {
+            if (pageBlocked()) return
             event.preventDefault()
             event.stopPropagation()
             show(index + 1)
@@ -1109,10 +1465,18 @@ window.__ModuleLoader__.load({
         show(at)
       }
 
-      /** Close the overlay, drop the keyboard hook and give the focus back. */
-      function close() {
+      /**
+       * Close the overlay, drop the keyboard hook and give the focus back.
+       * @param {boolean} [restoreFocus] - false when the composer just took the focus and must keep it.
+       */
+      function close(restoreFocus) {
         if (root === null) return
         root.style.display = 'none'
+        setSelecting(false)
+        if (resizeHandler !== null) {
+          window.removeEventListener('resize', resizeHandler)
+          resizeHandler = null
+        }
         if (keyHandler !== null) {
           document.removeEventListener('keydown', keyHandler, true)
           keyHandler = null
@@ -1121,6 +1485,12 @@ window.__ModuleLoader__.load({
           image.onerror = null
           image.onload = null
           image.removeAttribute('src')
+        }
+        // A paste just moved the focus to the composer; pulling it back to the
+        // thumbnail would take the caret away from the text that was sent with it.
+        if (restoreFocus === false) {
+          returnFocus = null
+          return
         }
         // The overlay took the focus; a keyboard reader must land back on the
         // thumbnail they opened it from, not at the top of the document.
@@ -1145,6 +1515,290 @@ window.__ModuleLoader__.load({
         offsetY = stageY - centerY - next * qy
         scale = next
         paint()
+      }
+
+      /** Show one line under the stage, replacing the standing hint. */
+      function setHint(text) {
+        if (hintLabel !== null) hintLabel.textContent = text
+      }
+
+      /** Say one short line in the toast; it fades after a moment. */
+      function announce(text) {
+        if (statusLabel === null) return
+        statusLabel.textContent = text
+        statusLabel.dataset.on = text === '' ? '0' : '1'
+        if (statusTimer !== 0) clearTimeout(statusTimer)
+        statusTimer = text === '' ? 0 : setTimeout(() => {
+          statusTimer = 0
+          if (statusLabel !== null) statusLabel.dataset.on = '0'
+        }, 2600)
+      }
+
+      /** Turn selection mode on or off; leaving it drops the box. */
+      function setSelecting(next) {
+        selecting = next
+        if (selecting === false) {
+          selection = null
+          inkDrag = null
+        }
+        if (selectButton !== null) selectButton.setAttribute('aria-pressed', selecting ? 'true' : 'false')
+        if (inkbar !== null) inkbar.style.display = selecting ? 'flex' : 'none'
+        if (stage !== null) stage.dataset.selecting = selecting ? '1' : '0'
+        if (ink !== null) ink.style.pointerEvents = selecting ? 'auto' : 'none'
+        setHint(selecting ? TEXT.hintSelect : TEXT.hintView)
+        inkPaint()
+      }
+
+      /** The bar button / the `S` key: enter selection mode, or leave it. */
+      function toggleSelecting() {
+        setSelecting(selecting === false)
+      }
+
+      /** Pick the instruction the next send carries, and say which one is on. */
+      function setTemplate(id) {
+        if (TEMPLATES.includes(id) !== true) return
+        template = id
+        for (const element of templateButtons) {
+          element.setAttribute('aria-pressed', element.dataset.template === id ? 'true' : 'false')
+        }
+      }
+
+      /** Map one viewport point onto source-image pixels (may fall outside the picture). */
+      function sourceAt(clientX, clientY) {
+        const box = stage.getBoundingClientRect()
+        return {
+          x: (clientX - box.left - box.width / 2 - offsetX) / scale + natural.width / 2,
+          y: (clientY - box.top - box.height / 2 - offsetY) / scale + natural.height / 2,
+        }
+      }
+
+      /** The four selection corners in source pixels, clockwise from top-left. */
+      function selectionCorners(box) {
+        return [
+          { x: box.x, y: box.y },
+          { x: box.x + box.w, y: box.y },
+          { x: box.x + box.w, y: box.y + box.h },
+          { x: box.x, y: box.y + box.h },
+        ]
+      }
+
+      /** Which corner handle one source-space point grabs, or -1. */
+      function handleAt(point) {
+        if (selection === null) return -1
+        const tolerance = GRAB_PX / scale
+        const corners = selectionCorners(selection)
+        for (let at = 0; at < corners.length; at += 1) {
+          if (Math.abs(point.x - corners[at].x) <= tolerance && Math.abs(point.y - corners[at].y) <= tolerance) return at
+        }
+        return -1
+      }
+
+      /** Whether one source-space point sits inside the current selection. */
+      function insideSelection(point) {
+        if (selection === null) return false
+        return point.x >= selection.x && point.x <= selection.x + selection.w
+          && point.y >= selection.y && point.y <= selection.y + selection.h
+      }
+
+      /** The clamped box two source-space corners describe, or null when it is too thin. */
+      function boxOf(one, other) {
+        const left = Math.max(0, Math.min(one.x, other.x))
+        const top = Math.max(0, Math.min(one.y, other.y))
+        const right = Math.min(natural.width, Math.max(one.x, other.x))
+        const bottom = Math.min(natural.height, Math.max(one.y, other.y))
+        if (right - left < MIN_SELECTION || bottom - top < MIN_SELECTION) return null
+        return { x: left, y: top, w: right - left, h: bottom - top }
+      }
+
+      /** Move one selection by a source-space delta, keeping it inside the picture. */
+      function moveBox(box, dx, dy) {
+        return {
+          x: Math.max(0, Math.min(natural.width - box.w, box.x + dx)),
+          y: Math.max(0, Math.min(natural.height - box.h, box.y + dy)),
+          w: box.w,
+          h: box.h,
+        }
+      }
+
+      /** Start a drag: a corner resizes from the opposite corner, the inside moves, anywhere else draws. */
+      function beginInk(event) {
+        if (selecting !== true) return
+        event.preventDefault()
+        event.stopPropagation()
+        if (image === null || natural.width <= 0) return
+        const point = sourceAt(event.clientX, event.clientY)
+        const handle = handleAt(point)
+        if (handle >= 0 && selection !== null) {
+          inkDrag = { mode: 'resize', anchor: selectionCorners(selection)[(handle + 2) % 4] }
+        } else if (insideSelection(point)) {
+          inkDrag = { mode: 'move', start: point, box: { ...selection } }
+        } else {
+          inkDrag = { mode: 'new', anchor: point }
+        }
+        try {
+          ink.setPointerCapture(event.pointerId)
+        } catch {
+          /* the pointer is already gone */
+        }
+      }
+
+      /** Update the drag and repaint the layer. */
+      function moveInk(event) {
+        if (inkDrag === null) return
+        event.preventDefault()
+        event.stopPropagation()
+        const point = sourceAt(event.clientX, event.clientY)
+        if (inkDrag.mode === 'move') {
+          selection = moveBox(inkDrag.box, point.x - inkDrag.start.x, point.y - inkDrag.start.y)
+        } else {
+          selection = boxOf(inkDrag.anchor, point)
+        }
+        inkPaint()
+      }
+
+      /** Finish a drag, dropping a selection too thin to be meant. */
+      function endInk(event) {
+        if (inkDrag === null) return
+        event.stopPropagation()
+        inkDrag = null
+        try {
+          ink.releasePointerCapture(event.pointerId)
+        } catch {
+          /* the pointer is already gone */
+        }
+        inkPaint()
+      }
+
+      /** Repaint the selection layer: same transform the picture uses, so they stay glued. */
+      function inkPaint() {
+        if (ink === null || image === null || natural.width <= 0) return
+        const context = ink.getContext('2d')
+        if (context === null) return
+        const box = stage.getBoundingClientRect()
+        const dpr = window.devicePixelRatio || 1
+        const width = Math.max(1, Math.round(box.width * dpr))
+        const height = Math.max(1, Math.round(box.height * dpr))
+        // Reallocate only when the viewport changed: assigning width/height every
+        // frame would clear the canvas and churn memory on every pointer move.
+        if (ink.width !== width || ink.height !== height) {
+          ink.width = width
+          ink.height = height
+        }
+        context.setTransform(1, 0, 0, 1, 0, 0)
+        context.clearRect(0, 0, ink.width, ink.height)
+        if (selection === null) {
+          ink.setAttribute('aria-label', '')
+          return
+        }
+        const k = dpr * scale
+        context.setTransform(
+          k,
+          0,
+          0,
+          k,
+          dpr * (box.width / 2 + offsetX - (natural.width / 2) * scale),
+          dpr * (box.height / 2 + offsetY - (natural.height / 2) * scale),
+        )
+        drawSelection(context, selection, natural, scale)
+        ink.setAttribute(
+          'aria-label',
+          '选区 ' + Math.round(selection.x) + ',' + Math.round(selection.y)
+            + ' ' + Math.round(selection.w) + '×' + Math.round(selection.h) + '（源图像素）',
+        )
+      }
+
+      /** Paint the dimmed surround, the dashed edge and the four corner handles. */
+      function drawSelection(context, box, naturalSize, zoom) {
+        const k = zoom > 0 ? zoom : 1
+        context.save()
+        context.fillStyle = 'rgba(0, 0, 0, 0.55)'
+        context.fillRect(0, 0, naturalSize.width, box.y)
+        context.fillRect(0, box.y + box.h, naturalSize.width, Math.max(0, naturalSize.height - box.y - box.h))
+        context.fillRect(0, box.y, box.x, box.h)
+        context.fillRect(box.x + box.w, box.y, Math.max(0, naturalSize.width - box.x - box.w), box.h)
+        context.strokeStyle = '#ffffff'
+        context.lineWidth = 1.5 / k
+        context.setLineDash([7 / k, 5 / k])
+        context.strokeRect(box.x, box.y, box.w, box.h)
+        context.setLineDash([])
+        const size = 8 / k
+        for (const corner of selectionCorners(box)) {
+          context.fillStyle = '#ffffff'
+          context.fillRect(corner.x - size / 2, corner.y - size / 2, size, size)
+          context.strokeStyle = 'rgba(0, 0, 0, 0.55)'
+          context.lineWidth = 1 / k
+          context.strokeRect(corner.x - size / 2, corner.y - size / 2, size, size)
+        }
+        context.restore()
+      }
+
+      /** Whether a pending selection should stop the picture from changing. */
+      function pageBlocked() {
+        if (selection === null) return false
+        announce(TEXT.pageFirst)
+        return true
+      }
+
+      /** Cut the current selection out as a PNG. */
+      function exportSelection() {
+        if (selection === null) return Promise.reject(new Error(TEXT.failed))
+        if (selection.w * selection.h > MAX_EXPORT_PIXELS) return Promise.reject(new Error(TEXT.tooBig))
+        return exportPng(image, selection)
+      }
+
+      /** The instruction that travels with the next picture. */
+      function instructionText() {
+        const lines = [TEXT.instructions[template] ?? TEXT.instructions.describe]
+        const file = paths[index] ?? ''
+        if (file !== '' && selection !== null) {
+          lines.push(TEXT.source
+            .replace('{path}', file)
+            .replace('{x}', String(Math.round(selection.x)))
+            .replace('{y}', String(Math.round(selection.y)))
+            .replace('{w}', String(Math.round(selection.w)))
+            .replace('{h}', String(Math.round(selection.h))))
+        }
+        return lines.join('\n')
+      }
+
+      /** Main exit: cut the selection, hand it to the composer, and get out of the way. */
+      async function sendSelection() {
+        if (selection === null) return
+        try {
+          const blob = await exportSelection()
+          const name = fileStamp(Date.now())
+          const before = attachmentCount()
+          const editor = findComposer(root)
+          if (editor === null) {
+            await copyToClipboard(blob)
+            announce(TEXT.fallback)
+            return
+          }
+          const claimed = pasteImageWithText(editor, blob, name, instructionText())
+          // The event being cancelled only says someone handled it; the tile shows
+          // whether the intake actually took the file.
+          await new Promise((resolve) => setTimeout(resolve, 320))
+          if (claimed === true && attachmentLanded(name, before) === true) {
+            announce(TEXT.sent)
+            close(false)
+            return
+          }
+          await copyToClipboard(blob)
+          announce(TEXT.fallback)
+        } catch (error) {
+          announce(String((error instanceof Error ? error.message : error) || TEXT.failed))
+        }
+      }
+
+      /** Second exit: the same bytes to the clipboard. */
+      async function copySelection() {
+        if (selection === null) return
+        try {
+          await copyToClipboard(await exportSelection())
+          announce(TEXT.copied)
+        } catch (error) {
+          announce(String((error instanceof Error ? error.message : error) || TEXT.failed))
+        }
       }
 
       /** Create the overlay DOM on first use. */
@@ -1195,8 +1849,12 @@ window.__ModuleLoader__.load({
           return element
         }
 
-        prevButton = button('‹', '上一张（←）', () => show(index - 1))
-        nextButton = button('›', '下一张（→）', () => show(index + 1))
+        prevButton = button('‹', '上一张（←）', () => {
+          if (pageBlocked() === false) show(index - 1)
+        })
+        nextButton = button('›', '下一张（→）', () => {
+          if (pageBlocked() === false) show(index + 1)
+        })
         button('−', '缩小（-）', () => {
           const box = stage.getBoundingClientRect()
           zoomAt(0.8, box.width / 2, box.height / 2)
@@ -1222,7 +1880,9 @@ window.__ModuleLoader__.load({
           bust = Date.now()
           show(index)
         })
-        button('关闭', '关闭（Esc）', close)
+        selectButton = button(TEXT.select, TEXT.selectTitle, toggleSelecting)
+        selectButton.setAttribute('aria-pressed', 'false')
+        button('关闭', '关闭（Esc）', () => close())
 
         const stageElement = document.createElement('div')
         stageElement.className = 'dsh-ipv-stage'
@@ -1230,14 +1890,20 @@ window.__ModuleLoader__.load({
         picture.className = 'dsh-ipv-image'
         picture.decoding = 'async'
         picture.alt = ''
+        const layer = document.createElement('canvas')
+        layer.className = 'dsh-ipv-ink'
+        // A canvas is opaque to a screen reader: name the thing it shows.
+        layer.setAttribute('role', 'img')
+        layer.setAttribute('aria-label', '')
         const messageElement = document.createElement('div')
         messageElement.className = 'dsh-ipv-message'
         // Failure explanations and the copy/reload confirmations are announced.
         messageElement.setAttribute('role', 'status')
         messageElement.setAttribute('aria-live', 'polite')
-        stageElement.append(picture, messageElement)
+        stageElement.append(picture, layer, messageElement)
         stage = stageElement
         image = picture
+        ink = layer
         message = messageElement
 
         stageElement.addEventListener('dblclick', (event) => {
@@ -1283,12 +1949,79 @@ window.__ModuleLoader__.load({
           { passive: false },
         )
 
-        const hint = document.createElement('div')
-        hint.className = 'dsh-ipv-hint'
-        hint.textContent = '滚轮缩放 · 拖动平移 · 双击切换适应/1:1 · ←/→ 换图 · Esc 关闭'
+        for (const type of ['pointerdown', 'pointermove', 'pointerup', 'pointercancel']) {
+          layer.addEventListener(type, type === 'pointerdown' ? beginInk : type === 'pointermove' ? moveInk : endInk)
+        }
+        // Selecting is a drag on the layer, never a pan of the stage under it, and
+        // a double click there must not flip fit/1:1 beneath a half-drawn box.
+        layer.addEventListener('dblclick', (event) => event.stopPropagation())
+
+        const hintbar = document.createElement('div')
+        hintbar.className = 'dsh-ipv-hint'
+        hintbar.textContent = TEXT.hintView
+        hintLabel = hintbar
+
+        inkbar = document.createElement('div')
+        inkbar.className = 'dsh-ipv-inkbar'
+        inkbar.setAttribute('role', 'toolbar')
+        inkbar.setAttribute('aria-label', TEXT.toolbar)
+        const templateLabel = document.createElement('span')
+        templateLabel.className = 'dsh-ipv-inklabel'
+        templateLabel.textContent = TEXT.template
+        inkbar.append(templateLabel)
+        templateButtons = TEMPLATES.map((id) => {
+          const element = document.createElement('button')
+          element.type = 'button'
+          element.className = 'dsh-ipv-tpl'
+          element.dataset.template = id
+          element.textContent = TEXT.templates[id]
+          element.title = TEXT.templates[id]
+          element.setAttribute('aria-label', TEXT.templates[id])
+          element.setAttribute('aria-pressed', id === template ? 'true' : 'false')
+          element.addEventListener('click', (event) => {
+            event.preventDefault()
+            event.stopPropagation()
+            setTemplate(id)
+          })
+          inkbar.append(element)
+          return element
+        })
+        const spacer = document.createElement('span')
+        spacer.className = 'dsh-ipv-inkspacer'
+        inkbar.append(spacer)
+        const inkButton = (label, onClick, primary) => {
+          const element = document.createElement('button')
+          element.type = 'button'
+          element.className = 'dsh-ipv-inkbtn' + (primary === true ? ' dsh-ipv-inkbtn-primary' : '')
+          element.textContent = label
+          element.setAttribute('aria-label', label)
+          element.addEventListener('click', (event) => {
+            event.preventDefault()
+            event.stopPropagation()
+            onClick()
+          })
+          return element
+        }
+        lookButton = inkButton(TEXT.look, () => {
+          sendSelection().catch(() => {})
+        }, true)
+        inkbar.append(
+          lookButton,
+          inkButton(TEXT.copy, () => {
+            copySelection().catch(() => {})
+          }),
+          inkButton(TEXT.cancel, () => setSelecting(false)),
+        )
+        inkbar.style.display = 'none'
+
+        statusLabel = document.createElement('div')
+        statusLabel.className = 'dsh-ipv-status'
+        statusLabel.setAttribute('role', 'status')
+        statusLabel.setAttribute('aria-live', 'polite')
+        statusLabel.dataset.on = '0'
 
         bar.append(nameLabel, metaLabel, tools)
-        root.append(bar, stageElement, hint)
+        root.append(bar, stageElement, inkbar, hintbar, statusLabel)
         root.addEventListener('pointerdown', (event) => {
           if (event.target === root) close()
         })
@@ -2139,6 +2872,15 @@ window.__ModuleLoader__.load({
         })
       } catch (error) {
         report('effects-failed', error)
+      }
+
+      try {
+        // "Send to the composer" needs to know which editor the reader was last in:
+        // the viewer covers the page, so nothing is focused when it closes.
+        document.addEventListener('focusin', rememberEditor, true)
+        ctx.effect(() => () => document.removeEventListener('focusin', rememberEditor, true))
+      } catch (error) {
+        report('composer-watch-failed', error)
       }
 
       try {

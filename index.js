@@ -684,6 +684,71 @@ function registerImageRoute(ctx) {
     })
   }
 
+  /** The last capability answer; the viewer asks on every open, so cache it. */
+  let capabilityCache = null
+
+  /**
+   * Which vision tools this host currently exposes.
+   *
+   * A missing registry, a restricted view or an older host all read as "absent":
+   * the browser half only uses this for a tooltip, so a false negative costs a
+   * hint and a thrown error would cost the route.
+   * @returns {{ describe: boolean, ocr: boolean, diff: boolean }} one flag per tool.
+   */
+  const visionTools = () => {
+    let registry
+    try {
+      registry = typeof ctx.get === 'function' ? ctx.get('tools') : undefined
+    } catch {
+      registry = undefined
+    }
+    // `ctx.get` is the service lookup a real composition uses; the property is the
+    // direct accessor a test stub provides. Either way, absence means "no answer".
+    if (registry === undefined || registry === null) registry = ctx.tools
+    const visible = (name) => {
+      try {
+        return registry !== undefined && registry !== null
+          && typeof registry.get === 'function'
+          && registry.get(name) !== undefined
+      } catch {
+        return false
+      }
+    }
+    return {
+      describe: visible('vision_describe'),
+      ocr: visible('vision_ocr'),
+      diff: visible('vision_pixel_diff'),
+    }
+  }
+
+  /**
+   * Serve `GET /image-preview/capabilities`: read-only metadata, no paths, no bytes.
+   *
+   * The browser half cannot see the tool registry; without this route the viewer
+   * cannot tell the reader that "看这块" will not reach a vision route.
+   */
+  const serveCapabilities = (req, res) => {
+    const entry = remember({ at: Date.now(), method: req.method, pathname: ROUTE + '/capabilities', hasQuery: false })
+    if (req.method !== 'GET' && req.method !== 'HEAD') {
+      entry.status = 405
+      res.writeHead(405, { allow: 'GET, HEAD', 'content-type': 'text/plain; charset=utf-8' })
+      res.end('GET or HEAD only')
+      return
+    }
+    if (refuse(req, res, entry) === true) return
+    const now = Date.now()
+    if (capabilityCache === null || now - capabilityCache.at > 5000) {
+      capabilityCache = { at: now, value: visionTools() }
+    }
+    entry.status = 200
+    if (req.method === 'HEAD') {
+      res.writeHead(200, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' })
+      res.end()
+      return
+    }
+    sendJson(res, 200, { ok: true, vision: capabilityCache.value, base: ROUTE, at: now })
+  }
+
   /** Serve `GET|HEAD /image-preview/blob/<base64url path>` and `/image-preview/file?path=…`. */
   const handler = (req, res) => {
     const url = typeof req.url === 'string' ? req.url : ''
@@ -693,7 +758,8 @@ function registerImageRoute(ctx) {
     const isDiag = pathname === ROUTE + '/diag'
     const isRead = pathname === ROUTE + '/read'
     const isReport = pathname === ROUTE + '/client-report'
-    if (!isQueryRoute && encodedAt === '' && !isDiag && !isRead && !isReport) {
+    const isCaps = pathname === ROUTE + '/capabilities'
+    if (!isQueryRoute && encodedAt === '' && !isDiag && !isRead && !isReport && !isCaps) {
       sendText(res, 404, 'unknown route')
       return
     }
@@ -703,6 +769,10 @@ function registerImageRoute(ctx) {
     }
     if (isReport === true) {
       serveReport(req, res)
+      return
+    }
+    if (isCaps === true) {
+      serveCapabilities(req, res)
       return
     }
     const entry = remember({ at: Date.now(), method: req.method, pathname, hasQuery: url.includes('?') })

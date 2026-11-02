@@ -66,6 +66,70 @@
   const afterShrink = box.querySelectorAll('.dsh-ip-chip').length
   out.streaming = { afterOne, afterTwo, afterCharData, afterShrink, pathTextIntact: p.textContent.includes('pg1.png') }
 
+  // Selection + composer hand-off (0.4). A stand-in composer takes the paste the
+  // way the real Lexical editor does: cancel it, show the file name in `alt`.
+  const fakeEditor = document.createElement('div')
+  fakeEditor.setAttribute('data-lexical-editor', 'true')
+  fakeEditor.contentEditable = 'true'
+  fakeEditor.style.cssText = 'position:fixed;left:8px;bottom:8px;width:220px;height:32px;border:1px solid #ccc'
+  let pasted = null
+  fakeEditor.addEventListener('paste', (event) => {
+    event.preventDefault()
+    const file = event.clipboardData === null ? null : event.clipboardData.files[0]
+    pasted = {
+      name: file === undefined || file === null ? '' : file.name,
+      type: file === undefined || file === null ? '' : file.type,
+      text: event.clipboardData === null ? '' : event.clipboardData.getData('text/plain'),
+    }
+    const tile = document.createElement('img')
+    tile.alt = pasted.name
+    tile.dataset.testTile = '1'
+    document.body.append(tile)
+  })
+  document.body.append(fakeEditor)
+
+  const firstFigure = document.querySelector('.dsh-ip-figure')
+  if (firstFigure) {
+    firstFigure.click()
+    await wait(600)
+    const selectButton = [...document.querySelectorAll('.dsh-ipv-btn')].find((b) => b.textContent === '选区')
+    out.select = { button: selectButton !== undefined }
+    if (selectButton !== undefined) {
+      selectButton.click()
+      await wait(100)
+      const layer = document.querySelector('.dsh-ipv-ink')
+      const stageBox = document.querySelector('.dsh-ipv-stage').getBoundingClientRect()
+      const fire = (type, x, y) => layer.dispatchEvent(new PointerEvent(type, {
+        bubbles: true,
+        cancelable: true,
+        clientX: x,
+        clientY: y,
+        button: 0,
+        pointerId: 7,
+      }))
+      fire('pointerdown', stageBox.left + 120, stageBox.top + 110)
+      fire('pointermove', stageBox.left + 320, stageBox.top + 250)
+      fire('pointerup', stageBox.left + 320, stageBox.top + 250)
+      await wait(80)
+      out.selection = {
+        inkbar: getComputedStyle(document.querySelector('.dsh-ipv-inkbar')).display,
+        label: layer.getAttribute('aria-label'),
+        canvas: [layer.width, layer.height],
+        selectPressed: selectButton.getAttribute('aria-pressed'),
+      }
+      // Enter on the overlay must cut the box, paste it into the composer and close.
+      document.querySelector('.dsh-ipv-root').dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }))
+      await wait(800)
+      out.sent = {
+        pasted,
+        viewer: getComputedStyle(document.querySelector('.dsh-ipv-root')).display,
+        tile: document.querySelector('img[data-test-tile="1"]') !== null,
+      }
+    }
+  }
+  for (const node of document.querySelectorAll('img[data-test-tile="1"]')) node.remove()
+  fakeEditor.remove()
+
   window.__result = out
   return 'ok'
 })()

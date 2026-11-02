@@ -4,6 +4,38 @@ Notable changes to `dsh-plugin-image-preview`. Format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), versions follow
 [SemVer](https://semver.org/) (pre-1.0: a minor bump may change behaviour).
 
+## [0.4.0] - 2026-11-02
+
+A picture is now something you can hand to the model: box a region in the viewer,
+and the crop plus one instruction land in the composer in a single paste.
+
+### Added
+- Viewer: 「选区」 (`S`) — drag a box over the picture, move it, resize it from any
+  corner; `Esc` cancels the box before it closes the viewer, and `←/→` will not page
+  away a drawn selection.
+- 「看图」 hands the cropped PNG and the chosen instruction to the composer with one
+  synthetic paste (the same intake as Ctrl+V) and closes the viewer on success;
+  failure falls back to the clipboard with a one-line explanation.
+- Instruction templates (describe / OCR / compare) kept in one `COPY.zh` table, plus
+  a provenance line (`来源：<path>（原图裁切 x,y,w,h）`) for follow-up questions.
+- `GET /image-preview/capabilities`: which `vision_*` tools the host exposes, used
+  only for the 「看图」 tooltip. Fenced and cached like the other routes.
+- `test/harness-assertions.js`: selection geometry, the aria label, and the whole
+  paste hand-off into a stand-in Lexical editor.
+
+### Changed
+- The viewer's keyboard hook answers only keys inside the overlay (`document` /
+  `body` included while it is open), so a paste into the composer cannot be
+  cancelled by the viewer's Enter/Esc handling.
+- The selection layer repaints in the same frame as the picture transform, and its
+  canvas is reallocated only when the viewport changes.
+- `Ctrl+C` copies the selected crop while a box exists, the whole picture otherwise.
+- Host smoke now covers the capability route, including its fence.
+
+### Fixed
+- `test/harness-assertions.js` checked a stale style-tag name and looked for the
+  hover panel before it was created; both made green runs look red.
+
 ## [0.3.0] - 2026-10-31
 
 The release that made the three surfaces behave under real use: streamed answers,
